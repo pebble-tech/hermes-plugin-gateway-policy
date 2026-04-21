@@ -1,0 +1,21 @@
+manifest_version: 1
+name: gateway-policy
+version: 0.1.0
+description: >
+  Gateway-level message-flow patterns for Hermes: listen-only windows (buffer
+  ambient group messages and collapse on tag) and human handover (silent
+  ingest + owner notification). Profile-agnostic; configured per profile via
+  config.yaml. Requires the `pre_gateway_dispatch` core hook.
+author: pebble-tech
+homepage: https://github.com/pebble-tech/hermes-plugin-gateway-policy
+license: MIT
+
+# No required env vars at the plugin level; the optional LLM classifier uses
+# Hermes's auxiliary_client and consults config.yaml `auxiliary.*` settings.
+requires_env: []
+
+provides_hooks:
+  - pre_gateway_dispatch
+
+provides_tools:
+  - trigger_handover

@@ -1,0 +1,19 @@
+# NOTE: this file is intentionally NOT a full Python packaging config.
+#
+# Hermes's Git-based installer (`hermes plugins install owner/repo`) clones
+# the repo and expects plugin files (`plugin.yaml`, `__init__.py`, …) at the
+# repo root. Standard Python packaging prefers a `src/<pkg>/` layout — the
+# two conflict.
+#
+# For now we only use pyproject.toml to pin dev-tool config (pytest, ruff).
+# If we later publish to PyPI for Hermes's entry-point plugin discovery, we
+# will add a `src/gateway_policy/` tree alongside the current layout.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "--import-mode=importlib"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"

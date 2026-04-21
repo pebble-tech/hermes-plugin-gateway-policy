@@ -1,0 +1,88 @@
+# gateway-policy — full config reference
+#
+# Paste the `plugins.gateway-policy:` block into your profile's
+# config.yaml (NOT into this file — this file lives inside the plugin
+# dir and is reference-only).
+#
+# All keys are optional; shown with their defaults where applicable.
+
+plugins:
+  gateway-policy:
+    enabled: true                  # master switch; false = plugin is a no-op
+
+    # -----------------------------------------------------------------
+    # listen_only: buffer ambient group messages; collapse on tag.
+    # -----------------------------------------------------------------
+    listen_only:
+      # How long after a tagged reply the bot keeps replying without
+      # re-tagging. 0 disables the follow-up window.
+      window_seconds: 120
+
+      # If true, bot only replies when explicitly @mentioned or when
+      # the follow-up window is open. If false, every message replies.
+      require_mention: true
+
+      # Max ambient messages held per chat while waiting for a tag.
+      # Older messages are dropped (FIFO).
+      buffer_max: 50
+
+      # Prefix prepended to the collapsed buffer when the bot finally
+      # replies — helps the LLM distinguish context from the new turn.
+      rewrite_header: "Recent chat context:"
+
+      # Chats to apply listen_only to. Each entry is a per-platform
+      # chat id. Same chat id across platforms does not conflict —
+      # match is (platform, chat_id).
+      chats:
+        - { platform: whatsapp, chat_id: "120363xxxxxxxxxxxx@g.us" }
+        # - { platform: telegram, chat_id: "-1001234567890" }
+
+    # -----------------------------------------------------------------
+    # handover: silent-ingest while the owner handles the chat.
+    # -----------------------------------------------------------------
+    handover:
+      enabled: false               # explicit opt-in
+
+      # Platforms to enable handover on.
+      platforms: [whatsapp]
+
+      # Where to notify when a handover activates.
+      owner:
+        platform: whatsapp
+        chat_id: "60123456789@s.whatsapp.net"
+        # Optional: include chat name / customer id in the notification.
+        notify_template: |
+          Handover requested in {chat_id}
+          Reason: {reason}
+          Last message: {last_message}
+
+      triggers:
+        # Phrase triggers are naive but cheap. Prefer short, unambiguous
+        # phrases. Matching is case-insensitive substring.
+        phrases:
+          - "speak to a human"
+          - "talk to the owner"
+          - "real person please"
+
+        # Optional LLM classifier (uses Hermes's auxiliary_client).
+        # Useful when phrase matching is too noisy (e.g. "design" triggering
+        # on every jersey design chat). Adds ~1 aux-LLM call per DM.
+        llm_classifier:
+          enabled: false
+          dm_only: true            # skip in groups to save tokens
+          # prompt: |
+          #   Decide if this customer message warrants escalating to a
+          #   human. Reply "yes" or "no" only.
+
+      # Auto-expire active handovers after this many minutes.
+      # 0 = never expire (owner must /takeback manually).
+      timeout_minutes: 60
+
+      # Command the owner sends (from their own account, in the same chat)
+      # to end the handover and return control to the bot.
+      exit_command: "/takeback"
+
+      # Register trigger_handover as a tool the agent can call.
+      # Guidance for *when* to call belongs in your AGENTS.md.
+      tool:
+        enabled: true
