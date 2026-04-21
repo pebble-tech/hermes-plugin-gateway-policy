@@ -9,13 +9,15 @@ Neither is active until you configure it.
 
 ## 1. Confirm the core hook is present
 
-This plugin needs `pre_gateway_dispatch` in Hermes core. Verify with:
+This plugin needs the `pre_gateway_dispatch` hook in Hermes core.
+Quick check:
 
 ```bash
-hermes debug hooks | grep pre_gateway_dispatch
+python -c "from hermes_cli.plugins import VALID_HOOKS; \
+  assert 'pre_gateway_dispatch' in VALID_HOOKS, 'hook missing'"
 ```
 
-If nothing prints, your Hermes build predates the hook. See
+If this errors, your Hermes build predates the hook — see
 `README.md` → "Core patch" for the fork/PR plan.
 
 ## 2. Add a config block to your profile

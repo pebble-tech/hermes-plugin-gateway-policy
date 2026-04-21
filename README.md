@@ -1,6 +1,6 @@
 # hermes-plugin-gateway-policy
 
-A standalone [Hermes Agent](https://github.com/unclecode/hermes-agent)
+A standalone [Hermes Agent](https://github.com/NousResearch/hermes-agent)
 plugin that adds two pre-dispatch message-flow patterns without
 touching any business-logic plugin:
 
@@ -74,10 +74,11 @@ is not enabled yet — see `pyproject.toml` for the planned hook.
   Verify with:
 
   ```bash
-  hermes debug hooks | grep pre_gateway_dispatch
+  python -c "from hermes_cli.plugins import VALID_HOOKS; \
+    assert 'pre_gateway_dispatch' in VALID_HOOKS"
   ```
 
-  If nothing prints, your Hermes build predates the hook — see
+  If this errors, your Hermes build predates the hook — see
   **Core patch** below.
 
 - For listen-only group chats: the chat must be configured so

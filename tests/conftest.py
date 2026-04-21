@@ -10,7 +10,6 @@ from __future__ import annotations
 import sys
 import types
 from dataclasses import dataclass
-from pathlib import Path  # noqa: F401  (re-exported for tests)
 from types import SimpleNamespace
 from typing import Any, Optional
 
