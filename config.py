@@ -13,6 +13,7 @@ Config shape:
         listen_only:
           window_seconds: 120
           require_mention: true      # only tag triggers reply during the window
+          buffer_ambient: true       # false = drop pre-tag / post-window msgs
           buffer_max: 50
           rewrite_header: "Recent chat context:"
           mention_patterns:          # optional; auto-inherits
@@ -122,6 +123,12 @@ class ListenOnlyConfig:
     # don't have to duplicate config. Plugin-level override available at
     # `plugins.gateway-policy.listen_only.mention_patterns`.
     mention_patterns: List[Pattern[str]] = field(default_factory=list)
+    # When True (default), pre-tag ambient group messages are appended to an
+    # in-memory buffer and silently ingested into the session transcript so a
+    # later mention can collapse them into context. Set False for a pure
+    # "tag-to-reply + follow-up window" flow where untagged messages outside
+    # the window are dropped completely (no buffer, no transcript write).
+    buffer_ambient: bool = True
 
 
 @dataclass
@@ -178,6 +185,7 @@ def _parse_listen_only(raw: Dict[str, Any]) -> ListenOnlyConfig:
     # Plugin-level override; auto-bridge from the adapter happens in
     # load_policy_config() below when this list is still empty.
     cfg.mention_patterns = _compile_patterns(raw.get("mention_patterns"))
+    cfg.buffer_ambient = bool(raw.get("buffer_ambient", cfg.buffer_ambient))
     return cfg
 
 

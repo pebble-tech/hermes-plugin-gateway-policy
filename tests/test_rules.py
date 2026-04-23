@@ -107,6 +107,54 @@ class TestListenOnly:
         # Window should be open for follow-up replies.
         assert fresh_state.listen_windows[("whatsapp", src_group.chat_id)] > time.time()
 
+    def test_chat_not_in_config_passes_through(self, fresh_state, src_group, session_store, gateway):
+        from gateway_policy.rules.listen_only import listen_only_rule
+        # No chats configured.
+        event = FakeEvent(text="hi", source=src_group)
+        assert listen_only_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        ) is None
+
+    def test_dm_passes_through(self, fresh_state, src_dm, session_store, gateway):
+        from gateway_policy.rules.listen_only import listen_only_rule
+        self._add_chat(fresh_state, src_dm)
+        event = FakeEvent(text="hi", source=src_dm)
+        assert listen_only_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        ) is None
+
+    def test_window_active_with_require_mention_still_buffers(
+        self, fresh_state, src_group, session_store, gateway
+    ):
+        from gateway_policy.rules.listen_only import listen_only_rule
+        self._add_chat(fresh_state, src_group)
+        fresh_state.listen_windows[("whatsapp", src_group.chat_id)] = time.time() + 30
+        event = FakeEvent(text="more context", source=src_group)
+        result = listen_only_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        # require_mention=True (default in fresh_state) → still buffer, no reply.
+        assert result["action"] == "skip"
+        assert result["reason"] == "listen_only_window_no_mention"
+
+    def test_buffer_ambient_false_drops_pretag_without_silent_ingest(
+        self, fresh_state, src_group, session_store, gateway
+    ):
+        """With buffer_ambient=False, untagged messages outside the window
+        must be skipped without any transcript write or buffer append."""
+        from gateway_policy.rules.listen_only import listen_only_rule
+        self._add_chat(fresh_state, src_group)
+        fresh_state.config.listen_only.buffer_ambient = False
+
+        event = FakeEvent(text="hi everyone", source=src_group)
+        result = listen_only_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "listen_only_no_tag"}
+        # No buffer append, no silent ingest.
+        assert len(fresh_state.buffer_for(("whatsapp", src_group.chat_id))) == 0
+        assert len(session_store.appended) == 0
+
     def test_non_bot_mention_does_not_trigger_reply(
         self, fresh_state, src_group, session_store, gateway
     ):
@@ -152,35 +200,24 @@ class TestListenOnly:
         assert result == {"action": "allow"}
         assert fresh_state.listen_windows[("whatsapp", src_group.chat_id)] > time.time()
 
-    def test_chat_not_in_config_passes_through(self, fresh_state, src_group, session_store, gateway):
-        from gateway_policy.rules.listen_only import listen_only_rule
-        # No chats configured.
-        event = FakeEvent(text="hi", source=src_group)
-        assert listen_only_rule(
-            event=event, gateway=gateway, session_store=session_store, state=fresh_state
-        ) is None
-
-    def test_dm_passes_through(self, fresh_state, src_dm, session_store, gateway):
-        from gateway_policy.rules.listen_only import listen_only_rule
-        self._add_chat(fresh_state, src_dm)
-        event = FakeEvent(text="hi", source=src_dm)
-        assert listen_only_rule(
-            event=event, gateway=gateway, session_store=session_store, state=fresh_state
-        ) is None
-
-    def test_window_active_with_require_mention_still_buffers(
+    def test_window_active_without_require_mention_replies_to_followups(
         self, fresh_state, src_group, session_store, gateway
     ):
+        """Regression: the 2-min follow-up window must let untagged
+        messages through as `allow` when require_mention=False."""
         from gateway_policy.rules.listen_only import listen_only_rule
         self._add_chat(fresh_state, src_group)
+        fresh_state.config.listen_only.require_mention = False
+        fresh_state.config.listen_only.buffer_ambient = False
         fresh_state.listen_windows[("whatsapp", src_group.chat_id)] = time.time() + 30
-        event = FakeEvent(text="more context", source=src_group)
+
+        event = FakeEvent(text="say want to do xxx", source=src_group)
         result = listen_only_rule(
             event=event, gateway=gateway, session_store=session_store, state=fresh_state
         )
-        # require_mention=True (default in fresh_state) → still buffer, no reply.
-        assert result["action"] == "skip"
-        assert result["reason"] == "listen_only_window_no_mention"
+        assert result == {"action": "allow"}
+        # Window refreshed on the follow-up.
+        assert fresh_state.listen_windows[("whatsapp", src_group.chat_id)] > time.time() + 29
 
 
 # ---------------------------------------------------------------------------

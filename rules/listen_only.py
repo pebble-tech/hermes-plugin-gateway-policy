@@ -1,9 +1,18 @@
 """listen_only rule.
 
-For configured chats: buffer ambient messages silently; on bot mention or
-within an active follow-up window, collapse the buffer into the next user
-turn (rewrite action) and (re)open the window. Restores the esping-demo
-2-minute follow-up pattern with zero core code.
+For configured chats: on bot mention (or within an active follow-up window
+when ``require_mention=False``), open/refresh the 2-minute window and let
+the message go through.
+
+Two modes, controlled by ``buffer_ambient``:
+
+  * ``buffer_ambient=True`` (default) — "listen and collapse": untagged
+    messages are appended to an in-memory buffer and silently ingested
+    into the transcript. When the bot is tagged, the buffer is collapsed
+    into a single ``Recent chat context:`` block on the user turn.
+  * ``buffer_ambient=False`` — "tag + follow-up window only": pre-tag and
+    out-of-window messages are dropped completely. Inside the window
+    (and with ``require_mention=False``) any message triggers a reply.
 """
 
 from __future__ import annotations
@@ -70,8 +79,9 @@ def listen_only_rule(*, event, gateway, session_store, state, **_kwargs) -> Opti
 
     mentioned = is_bot_mentioned(event, extra_patterns=cfg.mention_patterns)
 
-    # Path A: bot mentioned OR follow-up window active → reply (with buffered context)
-    if mentioned or (window_active and not cfg.require_mention) or (window_active and mentioned):
+    # Path A: bot mentioned OR follow-up window active (when require_mention=False)
+    # → reply (with buffered context if any).
+    if mentioned or (window_active and not cfg.require_mention):
         # Refresh the follow-up window.
         if cfg.window_seconds > 0:
             state.listen_windows[key] = now + cfg.window_seconds
@@ -95,13 +105,20 @@ def listen_only_rule(*, event, gateway, session_store, state, **_kwargs) -> Opti
 
     if window_active and cfg.require_mention and not mentioned:
         # Window is open but require_mention is true: still need a tag.
-        # Buffer this ambient message; do not reply.
+        # Buffer this message for the next tagged turn unless the operator
+        # opted out of buffering.
+        if not cfg.buffer_ambient:
+            return {"action": "skip", "reason": "listen_only_window_no_mention"}
         sender = getattr(source, "user_name", None) or getattr(source, "user_id", None) or "user"
         state.buffer_for(key).append((str(sender), text, now))
         silent_ingest(session_store, event, reason="listen_only_window")
         return {"action": "skip", "reason": "listen_only_window_no_mention"}
 
-    # Path B: ambient (no mention, no window) → buffer + transcript-ingest, drop reply.
+    # Path C: ambient (no mention, no window).
+    # With buffer_ambient=False the message is dropped silently — the operator
+    # explicitly does NOT want pre-tag messages pulled into the transcript.
+    if not cfg.buffer_ambient:
+        return {"action": "skip", "reason": "listen_only_no_tag"}
     sender = getattr(source, "user_name", None) or getattr(source, "user_id", None) or "user"
     state.buffer_for(key).append((str(sender), text, now))
     silent_ingest(session_store, event, reason="listen_only_ambient")
