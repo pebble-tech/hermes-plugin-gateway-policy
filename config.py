@@ -15,6 +15,8 @@ Config shape:
           require_mention: true      # only tag triggers reply during the window
           buffer_max: 50
           rewrite_header: "Recent chat context:"
+          mention_patterns:          # optional; auto-inherits
+            - "(?i)^bot\\b"          #   `whatsapp.mention_patterns` if omitted
           chats:
             - { platform: whatsapp, chat_id: "120363..." }
             - { platform: telegram, chat_id: "-100123..." }
@@ -44,8 +46,9 @@ Config shape:
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Pattern, Tuple
 
 logger = logging.getLogger("gateway-policy.config")
 
@@ -114,6 +117,11 @@ class ListenOnlyConfig:
     buffer_max: int = 50
     rewrite_header: str = "Recent chat context:"
     chats: List[ChatRef] = field(default_factory=list)
+    # Compiled regexes applied to event.text when detecting a bot mention.
+    # Auto-populated from the adapter's `whatsapp.mention_patterns` so users
+    # don't have to duplicate config. Plugin-level override available at
+    # `plugins.gateway-policy.listen_only.mention_patterns`.
+    mention_patterns: List[Pattern[str]] = field(default_factory=list)
 
 
 @dataclass
@@ -140,6 +148,24 @@ def _parse_chat_refs(raw: Any) -> List[ChatRef]:
     return out
 
 
+def _compile_patterns(raw: Any) -> List[Pattern[str]]:
+    """Compile a list/str of regex strings, logging and skipping invalid ones."""
+    if isinstance(raw, str):
+        candidates: List[str] = [raw]
+    elif isinstance(raw, list):
+        candidates = [str(p) for p in raw if p]
+    else:
+        return []
+
+    compiled: List[Pattern[str]] = []
+    for pattern in candidates:
+        try:
+            compiled.append(re.compile(pattern))
+        except re.error as exc:
+            logger.warning("skipping invalid mention_pattern %r: %s", pattern, exc)
+    return compiled
+
+
 def _parse_listen_only(raw: Dict[str, Any]) -> ListenOnlyConfig:
     cfg = ListenOnlyConfig()
     if not isinstance(raw, dict):
@@ -149,6 +175,9 @@ def _parse_listen_only(raw: Dict[str, Any]) -> ListenOnlyConfig:
     cfg.buffer_max = int(raw.get("buffer_max", cfg.buffer_max) or cfg.buffer_max)
     cfg.rewrite_header = str(raw.get("rewrite_header", cfg.rewrite_header))
     cfg.chats = _parse_chat_refs(raw.get("chats", []))
+    # Plugin-level override; auto-bridge from the adapter happens in
+    # load_policy_config() below when this list is still empty.
+    cfg.mention_patterns = _compile_patterns(raw.get("mention_patterns"))
     return cfg
 
 
@@ -214,4 +243,12 @@ def load_policy_config() -> PolicyConfig:
     policy = PolicyConfig(enabled=bool(section.get("enabled", True)))
     policy.listen_only = _parse_listen_only(section.get("listen_only") or {})
     policy.handover = _parse_handover(section.get("handover") or {})
+
+    # If the plugin didn't get explicit mention_patterns, inherit the
+    # adapter's WhatsApp `mention_patterns`. This avoids duplicating
+    # regexes the operator already configured on the WhatsApp adapter.
+    if not policy.listen_only.mention_patterns:
+        adapter_raw = (config.get("whatsapp") or {}).get("mention_patterns")
+        policy.listen_only.mention_patterns = _compile_patterns(adapter_raw)
+
     return policy

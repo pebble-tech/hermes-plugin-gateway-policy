@@ -79,6 +79,79 @@ class TestListenOnly:
         # Window opened.
         assert fresh_state.listen_windows[("whatsapp", src_group.chat_id)] > time.time()
 
+    def test_adapter_mention_pattern_triggers_reply(
+        self, fresh_state, src_group, session_store, gateway
+    ):
+        """Regression: profile-level `whatsapp.mention_patterns` like
+        ``(?i)^esping\\b`` should be treated as mentions by the plugin.
+        Previously only @bot/@assistant/@hermes literals worked, so
+        messages the adapter forwarded as mentions were silently ingested."""
+        import re
+        from gateway_policy.rules.listen_only import listen_only_rule
+
+        self._add_chat(fresh_state, src_group)
+        fresh_state.config.listen_only.mention_patterns = [
+            re.compile(r"(?i)^esping\b"),
+            re.compile(r"(?i)^bot\b"),
+        ]
+
+        event = FakeEvent(text="esping check stock please", source=src_group)
+        result = listen_only_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        # No buffered context, so "allow" (normal dispatch) is the right
+        # answer — the critical part is that it is NOT a `skip`.
+        assert result == {"action": "allow"}, (
+            "adapter mention_patterns must be honored by listen_only_rule"
+        )
+        # Window should be open for follow-up replies.
+        assert fresh_state.listen_windows[("whatsapp", src_group.chat_id)] > time.time()
+
+    def test_non_bot_mention_does_not_trigger_reply(
+        self, fresh_state, src_group, session_store, gateway
+    ):
+        """Regression: a group message tagging a non-bot user (e.g.
+        `@Alice take a look`) sets `raw_message.mentionedIds = [alice_id]`.
+        The plugin must NOT treat that as a bot mention. It may only trust
+        the tag when `mentionedIds` intersects `botIds`."""
+        from gateway_policy.rules.listen_only import listen_only_rule
+        self._add_chat(fresh_state, src_group)
+
+        event = FakeEvent(
+            text="look at this",
+            source=src_group,
+            raw_message={
+                "mentionedIds": ["60111111111@s.whatsapp.net"],
+                "botIds": ["60999999999@s.whatsapp.net"],
+            },
+        )
+        result = listen_only_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "listen_only_ambient"}
+        assert ("whatsapp", src_group.chat_id) not in fresh_state.listen_windows
+
+    def test_bot_mention_via_mentionedids_intersection(
+        self, fresh_state, src_group, session_store, gateway
+    ):
+        """Complement: when mentionedIds *does* contain the bot, open the window."""
+        from gateway_policy.rules.listen_only import listen_only_rule
+        self._add_chat(fresh_state, src_group)
+
+        event = FakeEvent(
+            text="help",
+            source=src_group,
+            raw_message={
+                "mentionedIds": ["60999999999@s.whatsapp.net"],
+                "botIds": ["60999999999@s.whatsapp.net"],
+            },
+        )
+        result = listen_only_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "allow"}
+        assert fresh_state.listen_windows[("whatsapp", src_group.chat_id)] > time.time()
+
     def test_chat_not_in_config_passes_through(self, fresh_state, src_group, session_store, gateway):
         from gateway_policy.rules.listen_only import listen_only_rule
         # No chats configured.

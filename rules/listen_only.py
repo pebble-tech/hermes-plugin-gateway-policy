@@ -68,7 +68,7 @@ def listen_only_rule(*, event, gateway, session_store, state, **_kwargs) -> Opti
     expiry = state.listen_windows.get(key, 0.0)
     window_active = expiry > now
 
-    mentioned = is_bot_mentioned(event)
+    mentioned = is_bot_mentioned(event, extra_patterns=cfg.mention_patterns)
 
     # Path A: bot mentioned OR follow-up window active → reply (with buffered context)
     if mentioned or (window_active and not cfg.require_mention) or (window_active and mentioned):
