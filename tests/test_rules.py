@@ -33,6 +33,7 @@ class FakeEvent:
     raw_message: dict = field(default_factory=dict)
     message_id: str = "m1"
     internal: bool = False
+    metadata: dict = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -295,6 +296,204 @@ class TestHandover:
         )
         assert result == {"action": "skip", "reason": "handover_exit"}
         assert not fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+
+    def test_takeback_with_owner_flag_still_deactivates(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Order matters: a /takeback inbound that *also* carries the
+        whatsapp_from_owner metadata flag (because both signals derive
+        from the same fromMe message) must end the handover, not slide
+        the TTL forward."""
+        from gateway_policy.rules.handover import handover_rule
+        fresh_state.handovers.activate(
+            "whatsapp",
+            src_dm.chat_id,
+            reason="manual",
+            activated_by="test",
+            ttl_seconds=600,
+        )
+        owner_src = FakeSource(
+            platform_str="whatsapp",
+            chat_type="dm",
+            chat_id=src_dm.chat_id,
+            user_id=fresh_state.config.handover.owner.chat_id,
+            user_name="Owner",
+        )
+        event = FakeEvent(
+            text="/takeback",
+            source=owner_src,
+            metadata={"whatsapp_from_owner": True},
+        )
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_exit"}
+        assert not fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+
+
+# ---------------------------------------------------------------------------
+# touch() / sliding TTL
+# ---------------------------------------------------------------------------
+
+class TestTouch:
+    def test_touch_on_cold_row_is_noop(self, fresh_state, src_dm):
+        """No row -> touch returns False, no SQL effect, no row created."""
+        ok = fresh_state.handovers.touch("whatsapp", src_dm.chat_id, ttl_seconds=600)
+        assert ok is False
+        assert fresh_state.handovers.get("whatsapp", src_dm.chat_id) is None
+
+    def test_touch_on_hot_row_pushes_expires_at_forward(self, fresh_state, src_dm):
+        """Touch slides expires_at to now + ttl regardless of original TTL."""
+        fresh_state.handovers.activate(
+            "whatsapp",
+            src_dm.chat_id,
+            reason="manual",
+            activated_by="test",
+            ttl_seconds=10,  # tiny initial TTL so we can detect the slide
+        )
+        original = fresh_state.handovers.get("whatsapp", src_dm.chat_id)
+        assert original is not None and original.expires_at is not None
+
+        ok = fresh_state.handovers.touch("whatsapp", src_dm.chat_id, ttl_seconds=600)
+        assert ok is True
+        bumped = fresh_state.handovers.get("whatsapp", src_dm.chat_id)
+        assert bumped is not None and bumped.expires_at is not None
+        # The new expires_at must be at least ~9 minutes in the future
+        # (the original TTL was 10s, so any sane "slide forward" beats it).
+        assert bumped.expires_at > original.expires_at + 500
+
+    def test_touch_on_no_ttl_row_is_noop(self, fresh_state, src_dm):
+        """Permanent handover (expires_at IS NULL) is left alone — sliding
+        a TTL onto a row the operator chose to keep open forever would be
+        a surprise.  This case is rare in practice (timeout_minutes=0)
+        but pinning it keeps future refactors honest."""
+        fresh_state.handovers.activate(
+            "whatsapp",
+            src_dm.chat_id,
+            reason="manual",
+            activated_by="test",
+            ttl_seconds=None,
+        )
+        ok = fresh_state.handovers.touch("whatsapp", src_dm.chat_id, ttl_seconds=600)
+        assert ok is False
+        row = fresh_state.handovers.get("whatsapp", src_dm.chat_id)
+        assert row is not None and row.expires_at is None
+
+
+# ---------------------------------------------------------------------------
+# Implicit owner activation / TTL slide via metadata flag
+# ---------------------------------------------------------------------------
+
+class TestOwnerImplicit:
+    def _owner_event(self, src, text="hello", flag=True):
+        return FakeEvent(
+            text=text,
+            source=src,
+            metadata={"whatsapp_from_owner": True} if flag else {},
+        )
+
+    def test_owner_inbound_on_cold_chat_activates_without_notify(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Owner types in a cold customer chat → activate handover with
+        activated_by='owner_implicit', no Telegram notify (the owner is
+        already the one in the chat)."""
+        from gateway_policy.rules.handover import handover_rule
+        from gateway.config import Platform
+
+        event = self._owner_event(src_dm, "got it, will sort it out")
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_owner_activate"}
+
+        row = fresh_state.handovers.get("whatsapp", src_dm.chat_id)
+        assert row is not None
+        assert row.activated_by == "owner_implicit"
+        assert row.reason == "owner_reply"
+        assert row.expires_at is not None
+
+        # No owner notification: adapter.sent must be empty.
+        assert gateway.adapters[Platform("whatsapp")].sent == []
+        # Silent ingest happened so the transcript records the owner's text.
+        assert len(session_store.appended) == 1
+
+    def test_owner_inbound_on_hot_chat_slides_ttl_no_double_activate(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Owner types in a chat with an active handover → touch the TTL,
+        keep activated_by intact, no notify, no double-activate."""
+        from gateway_policy.rules.handover import handover_rule
+        from gateway.config import Platform
+
+        fresh_state.handovers.activate(
+            "whatsapp",
+            src_dm.chat_id,
+            reason="agent_tool:scope mismatch",
+            activated_by="trigger_handover_tool",
+            ttl_seconds=10,  # near-expiry, so touch() effect is observable
+        )
+        before = fresh_state.handovers.get("whatsapp", src_dm.chat_id)
+
+        event = self._owner_event(src_dm, "ok handling it")
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_owner_extend"}
+
+        after = fresh_state.handovers.get("whatsapp", src_dm.chat_id)
+        assert after is not None
+        # activated_by stays as the originator — touch must not overwrite it.
+        assert after.activated_by == "trigger_handover_tool"
+        assert after.reason == "agent_tool:scope mismatch"
+        # TTL slid forward (config.timeout_minutes=10 in fresh_state).
+        assert after.expires_at is not None
+        assert after.expires_at > before.expires_at + 500
+        assert gateway.adapters[Platform("whatsapp")].sent == []
+
+    def test_customer_inbound_does_not_touch_ttl(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Customer-side inbound during active handover keeps the existing
+        silent-ingest behavior — the metadata flag is absent so touch()
+        must not be called."""
+        from gateway_policy.rules.handover import handover_rule
+
+        fresh_state.handovers.activate(
+            "whatsapp",
+            src_dm.chat_id,
+            reason="manual",
+            activated_by="trigger_handover_tool",
+            ttl_seconds=10,
+        )
+        before = fresh_state.handovers.get("whatsapp", src_dm.chat_id)
+
+        event = self._owner_event(src_dm, "still here?", flag=False)
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_active"}
+
+        after = fresh_state.handovers.get("whatsapp", src_dm.chat_id)
+        # expires_at unchanged within float tolerance.
+        assert after is not None and before is not None
+        assert abs((after.expires_at or 0) - (before.expires_at or 0)) < 0.01
+
+    def test_bot_outbound_without_flag_is_noop(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """A bot's own outbound (which the bridge LRU would have caught
+        upstream) reaches the rule with no flag set — must behave like a
+        plain customer inbound, not trigger any owner-implicit branch."""
+        from gateway_policy.rules.handover import handover_rule
+
+        # No active handover → cold path returns None.
+        event = self._owner_event(src_dm, "bot reply text", flag=False)
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result is None
+        assert fresh_state.handovers.get("whatsapp", src_dm.chat_id) is None
 
 
 # ---------------------------------------------------------------------------
