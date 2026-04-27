@@ -297,6 +297,75 @@ class TestHandover:
         assert result == {"action": "skip", "reason": "handover_exit"}
         assert not fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
 
+    def test_takeback_via_whatsapp_from_owner_flag_alone_deactivates(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Profiles where ``handover.owner.platform`` points at the
+        notification channel (e.g. Telegram) but the human owner actually
+        types in WhatsApp must still be able to ``/takeback``. The bridge
+        LRU classifier on the agent side stamps such inbounds with
+        ``metadata['whatsapp_from_owner']=True`` — that flag alone is
+        sufficient proof of ownership, no platform/sender match needed."""
+        from gateway_policy.rules.handover import handover_rule
+
+        # Owner configured for a *different* platform than the inbound —
+        # the legacy (platform, sender_id) match would never fire here.
+        fresh_state.config.handover.owner.platform = "telegram"
+        fresh_state.config.handover.owner.chat_id = "640466638"
+
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id, reason="manual", activated_by="test"
+        )
+        # sender_id is some random WhatsApp JID, not the configured owner.
+        non_owner_src = FakeSource(
+            platform_str="whatsapp",
+            chat_type="dm",
+            chat_id=src_dm.chat_id,
+            user_id="60173380115@s.whatsapp.net",
+            user_name="Owner-on-WA",
+        )
+        event = FakeEvent(
+            text="/takeback",
+            source=non_owner_src,
+            metadata={"whatsapp_from_owner": True},
+        )
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_exit"}
+        assert not fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+
+    def test_takeback_without_owner_flag_from_stranger_does_not_deactivate(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Negative complement: a ``/takeback`` from a sender that is
+        neither the configured owner nor flagged ``whatsapp_from_owner``
+        must NOT end the handover. Pre-existing trust model is preserved."""
+        from gateway_policy.rules.handover import handover_rule
+
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id, reason="manual", activated_by="test"
+        )
+        stranger_src = FakeSource(
+            platform_str="whatsapp",
+            chat_type="dm",
+            chat_id=src_dm.chat_id,
+            user_id="60199999999@s.whatsapp.net",
+            user_name="Random",
+        )
+        event = FakeEvent(
+            text="/takeback",
+            source=stranger_src,
+            metadata={"whatsapp_from_owner": False},
+        )
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        # Falls through to the active-handover silent-ingest path, never
+        # the exit branch — handover stays active.
+        assert result == {"action": "skip", "reason": "handover_active"}
+        assert fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+
     def test_takeback_with_owner_flag_still_deactivates(
         self, fresh_state, src_dm, session_store, gateway
     ):

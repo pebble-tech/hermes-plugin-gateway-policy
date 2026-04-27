@@ -47,6 +47,16 @@ def _platform_str(source: Any) -> str:
 
 
 def _is_owner_message(event: Any, owner_platform: Optional[str], owner_chat_id: Optional[str]) -> bool:
+    # Bridge-LRU-authenticated owner: any inbound the WhatsApp adapter
+    # tagged with whatsapp_from_owner came from the bot's own account
+    # (i.e. the human owner typing on the same number) and is owner-
+    # equivalent regardless of how `handover.owner.*` is configured.
+    # This unblocks /takeback in profiles where owner.platform points
+    # at a separate notification channel (e.g. Telegram) but the human
+    # actually replies in WhatsApp.
+    metadata = getattr(event, "metadata", None) or {}
+    if metadata.get("whatsapp_from_owner"):
+        return True
     if not owner_platform or not owner_chat_id:
         return False
     source = event.source
