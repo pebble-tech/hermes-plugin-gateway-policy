@@ -34,6 +34,7 @@ import logging
 from typing import Any, Dict, Optional
 
 from ..notify import format_chat_link, notify_owner
+from ..state import alias_chat_ids
 from ..transcript_utils import silent_ingest
 
 logger = logging.getLogger("gateway-policy.rules.handover")
@@ -114,7 +115,20 @@ def handover_rule(*, event, gateway, session_store, state, **_kwargs) -> Optiona
         return None
 
     text = (event.text or "").strip()
-    is_active = state.handovers.is_active(platform, chat_id)
+
+    # Alias-aware lookup: WhatsApp chats can surface as either a phone JID
+    # (``60123456789@s.whatsapp.net``) or a LID (``999999999999@lid``)
+    # for the same human, depending on protocol negotiation. Probing only
+    # the inbound form would silently miss a row stored under the other
+    # variant — which is how the bot stayed live for Kong while the
+    # handover row keyed by his phone JID was active. ``alias_chat_ids``
+    # enumerates every form for the lookup, then we pin all subsequent
+    # writes to the *stored* chat_id so we don't fragment the row across
+    # variants.
+    candidates = alias_chat_ids(platform, chat_id)
+    active_row = state.handovers.find_active(platform, candidates)
+    is_active = active_row is not None
+    stored_chat_id = active_row.chat_id if active_row else chat_id
 
     # 1) /takeback first — must beat the owner-implicit branch so an owner
     # sending the exit command ends the handover even though the same
@@ -125,7 +139,7 @@ def handover_rule(*, event, gateway, session_store, state, **_kwargs) -> Optiona
         and text.lower() == cfg.exit_command.lower()
         and _is_owner_message(event, cfg.owner.platform, cfg.owner.chat_id)
     ):
-        _deactivate(state, gateway, platform=platform, chat_id=chat_id, source=source)
+        _deactivate(state, gateway, platform=platform, chat_id=stored_chat_id, source=source)
         return {"action": "skip", "reason": "handover_exit"}
 
     # 2) Owner-implicit activation / TTL slide.  Driven entirely by adapter
@@ -137,7 +151,7 @@ def handover_rule(*, event, gateway, session_store, state, **_kwargs) -> Optiona
         ttl = cfg.timeout_minutes * 60 if cfg.timeout_minutes else None
         if is_active:
             if ttl:
-                state.handovers.touch(platform, chat_id, ttl)
+                state.handovers.touch(platform, stored_chat_id, ttl)
             silent_ingest(session_store, event, reason="handover_owner_extend")
             return {"action": "skip", "reason": "handover_owner_extend"}
 

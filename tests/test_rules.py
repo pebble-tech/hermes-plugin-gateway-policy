@@ -401,6 +401,208 @@ class TestHandover:
 
 
 # ---------------------------------------------------------------------------
+# WhatsApp phone-JID <-> LID alias keying
+# ---------------------------------------------------------------------------
+
+class TestWhatsappAliasKeying:
+    """Regression for the live bug where Kong's inbound surfaced as
+    ``122299244130458@lid`` while the active handover row was keyed by
+    ``60173380115@s.whatsapp.net``. Both forms identify the same human;
+    the bridge can flip between them. The rule must look up handover
+    state through every alias the bridge knows about, otherwise the bot
+    silently bypasses an active handover and replies to the customer.
+    """
+
+    @staticmethod
+    def _stub_aliases(monkeypatch, mapping):
+        """Stub :func:`gateway.whatsapp_identity.expand_whatsapp_aliases`
+        so the plugin's alias helper resolves without touching disk."""
+        import sys
+        import types
+
+        fake = types.ModuleType("gateway.whatsapp_identity")
+        fake.expand_whatsapp_aliases = lambda v: set(mapping.get(str(v), [str(v)]))
+        sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+        monkeypatch.setitem(sys.modules, "gateway.whatsapp_identity", fake)
+
+    def test_lid_inbound_finds_phone_keyed_handover(
+        self, fresh_state, session_store, gateway, monkeypatch
+    ):
+        from gateway_policy.rules.handover import handover_rule
+
+        # Bridge knows: phone 60173380115 <-> LID 122299244130458.
+        # Whichever form the helper is called with, it returns both bare
+        # numerics so every JID variant is reachable.
+        aliases = {
+            "60173380115@s.whatsapp.net": {"60173380115", "122299244130458"},
+            "60173380115": {"60173380115", "122299244130458"},
+            "122299244130458@lid": {"60173380115", "122299244130458"},
+            "122299244130458": {"60173380115", "122299244130458"},
+        }
+        self._stub_aliases(monkeypatch, aliases)
+
+        # Row was activated under the phone-form JID (e.g. by an earlier
+        # trigger_handover call when the bridge reported phone form).
+        fresh_state.handovers.activate(
+            "whatsapp",
+            "60173380115@s.whatsapp.net",
+            reason="agent_tool:smoke",
+            activated_by="trigger_handover_tool",
+            ttl_seconds=600,
+        )
+
+        # Now the customer messages and the bridge surfaces the LID form.
+        lid_src = FakeSource(
+            platform_str="whatsapp",
+            chat_type="dm",
+            chat_id="122299244130458@lid",
+            user_id="122299244130458@lid",
+            user_name="Kong",
+        )
+        event = FakeEvent(text="hi hi", source=lid_src)
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+
+        # Pre-fix: handover_rule returned None and the bot replied.
+        # Post-fix: rule must silently ingest under the existing handover.
+        assert result == {"action": "skip", "reason": "handover_active"}
+        assert len(session_store.appended) == 1
+
+    def test_owner_takeback_on_alias_form_deactivates(
+        self, fresh_state, session_store, gateway, monkeypatch
+    ):
+        """/takeback typed by the owner from the LID form must also end a
+        handover that was stored under the phone-JID form."""
+        from gateway_policy.rules.handover import handover_rule
+
+        aliases = {
+            "60173380115@s.whatsapp.net": {"60173380115", "122299244130458"},
+            "122299244130458@lid": {"60173380115", "122299244130458"},
+        }
+        self._stub_aliases(monkeypatch, aliases)
+
+        fresh_state.handovers.activate(
+            "whatsapp",
+            "60173380115@s.whatsapp.net",
+            reason="manual",
+            activated_by="trigger_handover_tool",
+            ttl_seconds=600,
+        )
+
+        owner_src = FakeSource(
+            platform_str="whatsapp",
+            chat_type="dm",
+            chat_id="122299244130458@lid",
+            user_id="122299244130458@lid",
+            user_name="Owner",
+        )
+        event = FakeEvent(
+            text="/takeback",
+            source=owner_src,
+            metadata={"whatsapp_from_owner": True},
+        )
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_exit"}
+        # Original phone-form row removed — not a stray new row under LID.
+        assert fresh_state.handovers.get(
+            "whatsapp", "60173380115@s.whatsapp.net"
+        ) is None
+        assert fresh_state.handovers.get(
+            "whatsapp", "122299244130458@lid"
+        ) is None
+
+    def test_owner_extend_touches_existing_alias_row(
+        self, fresh_state, session_store, gateway, monkeypatch
+    ):
+        """Owner-implicit TTL slide must update the existing alias row,
+        not create a parallel row under the inbound LID form."""
+        from gateway_policy.rules.handover import handover_rule
+
+        aliases = {
+            "60173380115@s.whatsapp.net": {"60173380115", "122299244130458"},
+            "122299244130458@lid": {"60173380115", "122299244130458"},
+        }
+        self._stub_aliases(monkeypatch, aliases)
+
+        fresh_state.handovers.activate(
+            "whatsapp",
+            "60173380115@s.whatsapp.net",
+            reason="manual",
+            activated_by="trigger_handover_tool",
+            ttl_seconds=10,  # near-expiry to make the slide observable
+        )
+        before = fresh_state.handovers.get("whatsapp", "60173380115@s.whatsapp.net")
+
+        owner_src = FakeSource(
+            platform_str="whatsapp",
+            chat_type="dm",
+            chat_id="122299244130458@lid",
+            user_id="122299244130458@lid",
+            user_name="Owner",
+        )
+        event = FakeEvent(
+            text="ok handling",
+            source=owner_src,
+            metadata={"whatsapp_from_owner": True},
+        )
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_owner_extend"}
+
+        after = fresh_state.handovers.get("whatsapp", "60173380115@s.whatsapp.net")
+        assert after is not None
+        assert after.activated_by == "trigger_handover_tool"
+        assert (after.expires_at or 0) > (before.expires_at or 0) + 500
+        # No parallel LID-keyed row.
+        assert fresh_state.handovers.get(
+            "whatsapp", "122299244130458@lid"
+        ) is None
+
+    def test_trigger_handover_reuses_existing_alias_row(
+        self, fresh_state, gateway, monkeypatch
+    ):
+        """The agent-driven trigger_handover tool must also detect an
+        existing alias row and reuse its chat_id, instead of creating a
+        sibling row under the inbound form (which would split TTLs and
+        re-leak past the next variant flip)."""
+        import json
+        from gateway_policy.tools.trigger_handover import make_trigger_handover_tool
+
+        aliases = {
+            "60173380115@s.whatsapp.net": {"60173380115", "122299244130458"},
+            "122299244130458@lid": {"60173380115", "122299244130458"},
+        }
+        self._stub_aliases(monkeypatch, aliases)
+
+        # Stale row keyed by the phone-form JID.
+        fresh_state.handovers.activate(
+            "whatsapp",
+            "60173380115@s.whatsapp.net",
+            reason="agent_tool:earlier",
+            activated_by="trigger_handover_tool",
+            ttl_seconds=600,
+        )
+
+        # Agent now invokes the tool from a session that surfaces the LID.
+        session_key = "agent:main:whatsapp:dm:122299244130458@lid"
+        fresh_state.active_sessions[session_key] = (
+            "whatsapp", "122299244130458@lid", "Kong", gateway,
+        )
+
+        _, handler = make_trigger_handover_tool(lambda: fresh_state)
+        result = json.loads(handler({"reason": "follow-up"}, task_id=session_key))
+        assert result["ok"] is True
+        # The reused row should be reflected in the tool's return payload.
+        assert result["chat_id"] == "60173380115@s.whatsapp.net"
+        # Exactly one row in the table — no LID sibling.
+        assert len(fresh_state.handovers.list_active()) == 1
+
+
+# ---------------------------------------------------------------------------
 # touch() / sliding TTL
 # ---------------------------------------------------------------------------
 
