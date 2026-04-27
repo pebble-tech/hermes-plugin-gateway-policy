@@ -152,6 +152,40 @@ class HandoverStore:
             return False
         return True
 
+    def touch(
+        self,
+        platform: str,
+        chat_id: str,
+        ttl_seconds: float,
+    ) -> bool:
+        """Slide the expiry on an existing handover.
+
+        Updates ``expires_at = now + ttl_seconds`` only if a row already
+        exists *and* it has a TTL set (a row with ``expires_at IS NULL``
+        means "no auto-expiry" — we don't want to retroactively impose
+        one just because the owner kept typing).  Returns True iff a row
+        was updated; False on cold or no-TTL rows.
+
+        Idempotent — safe to call from the pre-dispatch hook on every
+        owner-typed inbound; a single SQL UPDATE keeps the cost trivial.
+        """
+        if ttl_seconds is None or ttl_seconds <= 0:
+            return False
+        new_expires = time.time() + ttl_seconds
+        with self._lock:
+            conn = self._connect()
+            cur = conn.execute(
+                """
+                UPDATE handovers
+                   SET expires_at = ?
+                 WHERE platform = ?
+                   AND chat_id = ?
+                   AND expires_at IS NOT NULL
+                """,
+                (new_expires, platform, chat_id),
+            )
+            return (cur.rowcount or 0) > 0
+
     def mark_notified(self, platform: str, chat_id: str) -> None:
         with self._lock:
             conn = self._connect()

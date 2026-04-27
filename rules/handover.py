@@ -1,13 +1,29 @@
 """handover rule.
 
-Activation lives entirely in the agent-callable ``trigger_handover`` tool
-(see ``tools/trigger_handover.py``). This rule only enforces an *already
-active* handover at the gateway:
+Activation lives in two places:
 
-  1. Customer message during an active handover -> silent ingest, no reply.
-  2. Owner sends ``exit_command`` in the customer chat -> deactivate + notify.
+  1. The agent-callable ``trigger_handover`` tool (see
+     ``tools/trigger_handover.py``) — primary path, used when the
+     conversational agent itself decides handover is needed.
+  2. **Implicit** activation when the owner types in the customer chat
+     directly (only available when the WhatsApp adapter forwards
+     ``metadata['whatsapp_from_owner']`` — the
+     ``WHATSAPP_FORWARD_OWNER_MESSAGES`` env flag in hermes-agent).
+     Treat any owner-typed inbound as proof the owner is engaged: if no
+     handover is active yet, activate one (``activated_by="owner_implicit"``,
+     no Telegram notify because the owner is already in the chat); if one
+     is already active, just slide the TTL forward.  This keeps the
+     handover alive for the duration of the owner's manual conversation.
 
-Gateway-side activation (phrase match, LLM classifier) was removed —
+Beyond activation, the rule still handles:
+
+  * ``exit_command`` (e.g. ``/takeback``) → deactivate + notify.  This is
+    checked **before** the owner-implicit branch so an owner sending
+    ``/takeback`` ends the handover even though the same message also
+    carries the ``whatsapp_from_owner`` flag.
+  * Customer message during an active handover → silent ingest, no reply.
+
+Gateway-side activation by phrase match / LLM classifier was removed —
 phrases were unreliable across languages and the classifier duplicated
 the main agent's own context-aware judgement.
 """
@@ -87,21 +103,51 @@ def handover_rule(*, event, gateway, session_store, state, **_kwargs) -> Optiona
     if not chat_id:
         return None
 
-    if not state.handovers.is_active(platform, chat_id):
-        return None
-
     text = (event.text or "").strip()
+    is_active = state.handovers.is_active(platform, chat_id)
 
-    # Owner steps into the customer chat with the exit command -> end handover.
-    # Possible only if the owner is somehow present in the chat (common in
-    # groups, less so in DMs without a shim).
+    # 1) /takeback first — must beat the owner-implicit branch so an owner
+    # sending the exit command ends the handover even though the same
+    # inbound also carries the whatsapp_from_owner metadata flag.
     if (
-        cfg.exit_command
+        is_active
+        and cfg.exit_command
         and text.lower() == cfg.exit_command.lower()
         and _is_owner_message(event, cfg.owner.platform, cfg.owner.chat_id)
     ):
         _deactivate(state, gateway, platform=platform, chat_id=chat_id, source=source)
         return {"action": "skip", "reason": "handover_exit"}
+
+    # 2) Owner-implicit activation / TTL slide.  Driven entirely by adapter
+    # metadata — see WhatsAppAdapter._build_message_event in hermes-agent.
+    # No notify on either branch: the owner is already in the chat, so a
+    # Telegram ping would be noise.
+    metadata = getattr(event, "metadata", None) or {}
+    if metadata.get("whatsapp_from_owner"):
+        ttl = cfg.timeout_minutes * 60 if cfg.timeout_minutes else None
+        if is_active:
+            if ttl:
+                state.handovers.touch(platform, chat_id, ttl)
+            silent_ingest(session_store, event, reason="handover_owner_extend")
+            return {"action": "skip", "reason": "handover_owner_extend"}
+
+        # Cold chat -> activate without notify.  ``activated_by`` doubles as
+        # the suppress-notify signal in trigger_handover.py / future call
+        # sites; ``reason`` documents *why* in the persistent row.
+        state.handovers.activate(
+            platform,
+            chat_id,
+            reason="owner_reply",
+            activated_by="owner_implicit",
+            ttl_seconds=ttl,
+        )
+        silent_ingest(session_store, event, reason="handover_owner_activate")
+        return {"action": "skip", "reason": "handover_owner_activate"}
+
+    # 3) Existing path: customer-side messages during an active handover get
+    # silently ingested so the owner can catch up later.
+    if not is_active:
+        return None
 
     silent_ingest(session_store, event, reason="handover_active")
     return {"action": "skip", "reason": "handover_active"}
