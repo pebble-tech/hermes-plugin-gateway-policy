@@ -57,8 +57,13 @@ else:
         if not state.config.enabled:
             return None
 
-        # Stash source-by-session_key so trigger_handover (which only receives
-        # task_id == session_key) can recover the platform/chat_id/user_name.
+        # Stash source-by-(session_key, session_id) so trigger_handover can
+        # recover the platform/chat_id/user_name from whichever id the agent
+        # forwards as ``task_id``.  The gateway's main message dispatch path
+        # passes ``task_id=session_id`` (the per-session file id, e.g.
+        # ``20260427_133748_e36f7ec9``), NOT the routing session_key
+        # (``agent:main:<platform>:...``).  Stashing under both means the
+        # tool's cache lookup hits regardless of which id the runtime uses.
         try:
             source = event.source
             platform = (
@@ -69,7 +74,17 @@ else:
             chat_id = str(getattr(source, "chat_id", "") or "")
             user_name = str(getattr(source, "user_name", "") or "")
             session_key = gateway._session_key_for_source(source)
-            state.active_sessions[session_key] = (platform, chat_id, user_name, gateway)
+            cached = (platform, chat_id, user_name, gateway)
+            state.active_sessions[session_key] = cached
+            if session_store is not None:
+                try:
+                    session_store._ensure_loaded()
+                    entry = session_store._entries.get(session_key)
+                    session_id = getattr(entry, "session_id", None) if entry else None
+                    if session_id:
+                        state.active_sessions[session_id] = cached
+                except Exception:
+                    pass
         except Exception:
             pass
 

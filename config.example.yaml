@@ -67,7 +67,17 @@ plugins:
 
       # Notification templates. Available placeholders:
       #   {customer_name} {chat_id} {platform} {reason} {activated_by}
-      notify_on_activate: "Handover: {customer_name} in {chat_id}. Reason: {reason}"
+      #   {customer_phone}  — normalized phone (digits only). For WhatsApp
+      #                       this resolves LIDs via the bridge mapping; for
+      #                       Telegram it's the numeric user_id; for other
+      #                       platforms it's the raw chat_id.
+      #   {customer_link}   — clickable platform deep link. WhatsApp →
+      #                       https://wa.me/<phone>; Telegram →
+      #                       tg://user?id=<id>; otherwise raw chat_id.
+      notify_on_activate: |
+        Handover: {customer_name} ({platform} {customer_phone})
+        Reason: {reason}
+        Chat: {customer_link}
       notify_on_exit: "Handover ended for {customer_name}."
 
       # Register trigger_handover as a tool the agent can call.
