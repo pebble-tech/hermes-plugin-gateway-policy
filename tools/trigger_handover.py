@@ -19,6 +19,7 @@ import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
 from ..notify import format_chat_link, notify_owner
+from ..state import alias_chat_ids
 
 logger = logging.getLogger("gateway-policy.tools.trigger_handover")
 
@@ -138,9 +139,15 @@ def make_trigger_handover_tool(
             )
 
         ttl = cfg.timeout_minutes * 60 if cfg.timeout_minutes else None
+        # If a row already exists under any alias form (phone-JID/LID),
+        # reuse its chat_id so we don't fragment state across variants.
+        existing = state.handovers.find_active(
+            platform, alias_chat_ids(platform, chat_id)
+        )
+        active_chat_id = existing.chat_id if existing else chat_id
         state.handovers.activate(
             platform,
-            chat_id,
+            active_chat_id,
             reason=f"agent_tool:{reason}",
             activated_by="trigger_handover_tool",
             ttl_seconds=ttl,
@@ -149,10 +156,10 @@ def make_trigger_handover_tool(
         notified = False
         if gateway and cfg.owner.platform and cfg.owner.chat_id:
             customer_name = user_name or "customer"
-            customer_phone, customer_link = format_chat_link(platform, chat_id)
+            customer_phone, customer_link = format_chat_link(platform, active_chat_id)
             message = cfg.notify_on_activate.format(
                 customer_name=customer_name,
-                chat_id=chat_id,
+                chat_id=active_chat_id,
                 platform=platform,
                 reason=reason,
                 activated_by="agent",
@@ -168,16 +175,16 @@ def make_trigger_handover_tool(
                 message=message,
             )
             if notified:
-                state.handovers.mark_notified(platform, chat_id)
+                state.handovers.mark_notified(platform, active_chat_id)
 
         logger.info(
             "trigger_handover activated by agent: platform=%s chat=%s reason=%s notified=%s",
-            platform, chat_id, reason, notified,
+            platform, active_chat_id, reason, notified,
         )
 
         return _ok({
             "platform": platform,
-            "chat_id": chat_id,
+            "chat_id": active_chat_id,
             "owner_notified": notified,
             "expires_at": (
                 time.time() + ttl if ttl else None

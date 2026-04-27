@@ -15,13 +15,73 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Deque, Dict, List, Optional, Tuple
+from typing import Any, Deque, Dict, Iterable, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
 
 from .config import PolicyConfig
 
 logger = logging.getLogger("gateway-policy.state")
+
+
+def whatsapp_alias_chat_ids(chat_id: str) -> List[str]:
+    """Return all WhatsApp JID forms that alias the same chat.
+
+    The bridge surfaces the same human under either the phone JID
+    (``60123456789@s.whatsapp.net``) or the LID (``999999999999@lid``)
+    depending on protocol version, contact-card state, and whatever
+    Baileys learned in the current session. State keyed by one form
+    silently misses lookups using the other, which is exactly the bug
+    that allowed the bot to keep replying after a handover was active.
+
+    We resolve the alias set via
+    :func:`gateway.whatsapp_identity.expand_whatsapp_aliases` (the same
+    helper Hermes core uses for session keys) and re-form each numeric
+    alias as both ``@s.whatsapp.net`` and ``@lid`` so callers can probe
+    every shape an old row could have been stored under.
+
+    The original ``chat_id`` is always first in the result so callers
+    that pick the first hit preserve previous semantics. Returns
+    ``[chat_id]`` when the helper is unavailable (older Hermes) or no
+    mapping files exist yet — in that case the caller is no worse off
+    than before.
+    """
+    if not chat_id:
+        return []
+    try:
+        from gateway.whatsapp_identity import expand_whatsapp_aliases
+    except ImportError:
+        return [chat_id]
+    try:
+        bare = expand_whatsapp_aliases(chat_id)
+    except Exception as exc:
+        logger.debug("expand_whatsapp_aliases(%r) failed: %s", chat_id, exc)
+        return [chat_id]
+    if not bare:
+        return [chat_id]
+
+    forms: List[str] = [chat_id]
+    seen = {chat_id}
+    # Sort numeric aliases so the canonical (shortest, lexicographically
+    # smallest) form is probed before any longer LID — speeds up the
+    # common case where only one alias is actually stored.
+    for numeric in sorted(bare, key=lambda v: (len(v), v)):
+        for variant in (numeric, f"{numeric}@s.whatsapp.net", f"{numeric}@lid"):
+            if variant not in seen:
+                seen.add(variant)
+                forms.append(variant)
+    return forms
+
+
+def alias_chat_ids(platform: str, chat_id: str) -> List[str]:
+    """Platform-aware alias expansion for handover lookups.
+
+    WhatsApp chats can flip between phone-JID and LID forms; other
+    platforms have stable chat ids and pass through unchanged.
+    """
+    if (platform or "").lower() == "whatsapp":
+        return whatsapp_alias_chat_ids(chat_id)
+    return [chat_id] if chat_id else []
 
 
 @dataclass
@@ -151,6 +211,31 @@ class HandoverStore:
             self.deactivate(platform, chat_id)
             return False
         return True
+
+    def find_active(
+        self, platform: str, candidates: Iterable[str]
+    ) -> Optional[HandoverRow]:
+        """Return the first non-expired row for any of ``candidates``.
+
+        Used by callers that know multiple chat_id forms can alias to the
+        same chat (e.g. WhatsApp phone-JID vs LID). Expired rows are
+        deactivated lazily, matching :meth:`is_active`'s contract.
+        Returns ``None`` if no candidate has an active row.
+        """
+        seen: set = set()
+        now = time.time()
+        for cid in candidates:
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            row = self.get(platform, cid)
+            if not row:
+                continue
+            if row.expires_at is not None and row.expires_at < now:
+                self.deactivate(platform, cid)
+                continue
+            return row
+        return None
 
     def touch(
         self,
