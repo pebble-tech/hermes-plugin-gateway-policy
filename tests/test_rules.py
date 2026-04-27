@@ -322,6 +322,29 @@ class TestTriggerHandoverTool:
         assert result["chat_id"] == src_dm.chat_id
         assert fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
 
+    def test_activates_via_session_id_lookup(self, fresh_state, src_dm, gateway):
+        """Production path: gateway forwards ``task_id=session_id`` (e.g.
+        ``20260427_133748_e36f7ec9``), not the routing session_key. The hook
+        stashes by both — verify the file-style session_id resolves cleanly.
+        """
+        from gateway_policy.tools.trigger_handover import make_trigger_handover_tool
+
+        session_id = "20260427_133748_e36f7ec9"
+        fresh_state.active_sessions[session_id] = (
+            "whatsapp", src_dm.chat_id, src_dm.user_name, gateway,
+        )
+
+        schema, handler = make_trigger_handover_tool(lambda: fresh_state)
+        result_json = handler(
+            {"reason": "Customer asked for custom design quote"},
+            task_id=session_id,
+        )
+        result = json.loads(result_json)
+        assert result["ok"] is True
+        assert result["platform"] == "whatsapp"
+        assert result["chat_id"] == src_dm.chat_id
+        assert fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+
     def test_falls_back_to_session_key_parsing(self, fresh_state, gateway):
         """When active_sessions stash is missing, parses task_id."""
         from gateway_policy.tools.trigger_handover import make_trigger_handover_tool
@@ -348,6 +371,235 @@ class TestTriggerHandoverTool:
         result = json.loads(handler({"reason": "x"}, task_id="agent:main:whatsapp:dm:y"))
         assert result["ok"] is False
         assert result["error_code"] == "handover_disabled"
+
+    def test_pre_dispatch_hook_stashes_by_session_id(
+        self, fresh_state, src_dm, gateway, monkeypatch
+    ):
+        """End-to-end regression: the hook must stash session context under
+        the per-session file id so the tool finds it when the agent forwards
+        ``task_id=session_id`` (not session_key)."""
+        import gateway_policy as gp
+
+        monkeypatch.setattr(gp, "_state", fresh_state)
+
+        session_key = gateway._session_key_for_source(src_dm)
+        session_id = "20260427_140000_abcdef12"
+
+        class _Entry:
+            def __init__(self, sid):
+                self.session_id = sid
+
+        class _Store:
+            def __init__(self):
+                self._entries = {session_key: _Entry(session_id)}
+
+            def _ensure_loaded(self):
+                pass
+
+        gp._pre_gateway_dispatch(
+            event=FakeEvent(text="hi", source=src_dm),
+            gateway=gateway,
+            session_store=_Store(),
+        )
+
+        assert session_key in fresh_state.active_sessions
+        assert session_id in fresh_state.active_sessions
+        cached_by_sid = fresh_state.active_sessions[session_id]
+        assert cached_by_sid[0] == "whatsapp"
+        assert cached_by_sid[1] == src_dm.chat_id
+
+
+# ---------------------------------------------------------------------------
+# format_chat_link helper
+# ---------------------------------------------------------------------------
+
+class TestFormatChatLink:
+    def test_whatsapp_lid_with_mapping_returns_canonical_phone(self, monkeypatch):
+        """LID with a bridge mapping must resolve to the canonical phone."""
+        from gateway_policy import notify
+
+        # Inject a fake gateway.whatsapp_identity that maps the LID to a phone.
+        import sys
+        import types
+
+        fake_mod = types.ModuleType("gateway.whatsapp_identity")
+        fake_mod.canonical_whatsapp_identifier = lambda v: (
+            "60173380115" if "@lid" in str(v) else str(v)
+        )
+        sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+        monkeypatch.setitem(sys.modules, "gateway.whatsapp_identity", fake_mod)
+
+        phone, link = notify.format_chat_link("whatsapp", "122299244130458@lid")
+        assert phone == "60173380115"
+        assert link == "https://wa.me/60173380115"
+
+    def test_whatsapp_phone_jid_returns_phone_and_wame_link(self, monkeypatch):
+        """A bare phone JID (no LID) just gets its suffix stripped."""
+        import sys
+        import types
+
+        from gateway_policy import notify
+
+        fake_mod = types.ModuleType("gateway.whatsapp_identity")
+        # Helper returns the JID untouched when it's already a phone.
+        fake_mod.canonical_whatsapp_identifier = lambda v: str(v)
+        sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+        monkeypatch.setitem(sys.modules, "gateway.whatsapp_identity", fake_mod)
+
+        phone, link = notify.format_chat_link(
+            "whatsapp", "60173380115@s.whatsapp.net"
+        )
+        assert phone == "60173380115"
+        assert link == "https://wa.me/60173380115"
+
+    def test_whatsapp_canonical_helper_import_error_strips_suffix(self, monkeypatch):
+        """If neither canonical helper is importable, fall back to a
+        last-resort suffix strip so we still produce a usable wa.me link."""
+        from unittest.mock import patch
+
+        from gateway_policy import notify
+
+        real_import = __builtins__["__import__"] if isinstance(__builtins__, dict) else __builtins__.__import__
+
+        def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name in ("gateway.whatsapp_identity", "gateway.session"):
+                raise ImportError(f"simulated: {name} unavailable")
+            return real_import(name, globals, locals, fromlist, level)
+
+        with patch("builtins.__import__", side_effect=fake_import):
+            phone, link = notify.format_chat_link(
+                "whatsapp", "60173380115@s.whatsapp.net"
+            )
+        assert phone == "60173380115"
+        assert link == "https://wa.me/60173380115"
+
+    def test_whatsapp_lid_no_mapping_strips_to_digits(self, monkeypatch):
+        """LID with no mapping: canonical helper returns it unchanged.
+        We still strip ``@lid`` so the wa.me link gets pure digits (best
+        effort — owner can copy the digits even if wa.me doesn't resolve)."""
+        import sys
+        import types
+
+        from gateway_policy import notify
+
+        fake_mod = types.ModuleType("gateway.whatsapp_identity")
+        fake_mod.canonical_whatsapp_identifier = lambda v: str(v)
+        sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+        monkeypatch.setitem(sys.modules, "gateway.whatsapp_identity", fake_mod)
+
+        phone, link = notify.format_chat_link("whatsapp", "122299244130458@lid")
+        assert phone == "122299244130458"
+        assert link == "https://wa.me/122299244130458"
+
+    def test_telegram_numeric_id_returns_tg_link(self):
+        from gateway_policy import notify
+
+        phone, link = notify.format_chat_link("telegram", "640466638")
+        assert phone == "640466638"
+        assert link == "tg://user?id=640466638"
+
+    def test_unknown_platform_returns_raw_chat_id(self):
+        from gateway_policy import notify
+
+        for plat in ("discord", "matrix", "bluebubbles", "api_server", "unknown"):
+            phone, link = notify.format_chat_link(plat, "abc-123")
+            assert phone == "abc-123", plat
+            assert link == "abc-123", plat
+
+    def test_empty_chat_id_returns_safe_defaults(self):
+        from gateway_policy import notify
+
+        for plat in ("whatsapp", "telegram", "discord"):
+            assert notify.format_chat_link(plat, "") == ("", "")
+            assert notify.format_chat_link(plat, None) == ("", "")  # type: ignore[arg-type]
+
+    def test_none_platform_does_not_raise(self):
+        from gateway_policy import notify
+
+        phone, link = notify.format_chat_link(None, "abc")  # type: ignore[arg-type]
+        assert phone == "abc"
+        assert link == "abc"
+
+
+# ---------------------------------------------------------------------------
+# trigger_handover token rendering
+# ---------------------------------------------------------------------------
+
+class TestNotifyTokens:
+    def test_activate_message_includes_phone_and_link(
+        self, fresh_state, src_dm, gateway, monkeypatch
+    ):
+        """End-to-end: handler should format the configured template with
+        the new ``{customer_phone}`` and ``{customer_link}`` tokens populated
+        from the canonicalisation helper."""
+        import sys
+        import types
+
+        from gateway_policy.tools.trigger_handover import make_trigger_handover_tool
+
+        # Stub canonical helper -> known phone.
+        fake_mod = types.ModuleType("gateway.whatsapp_identity")
+        fake_mod.canonical_whatsapp_identifier = lambda v: "60173380115"
+        sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+        monkeypatch.setitem(sys.modules, "gateway.whatsapp_identity", fake_mod)
+
+        # Owner on whatsapp (gateway fixture only loads whatsapp adapter).
+        fresh_state.config.handover.owner.platform = "whatsapp"
+        fresh_state.config.handover.owner.chat_id = "60111111111@s.whatsapp.net"
+        fresh_state.config.handover.notify_on_activate = (
+            "Handover: {customer_name} ({platform} {customer_phone})\n"
+            "Reason: {reason}\n"
+            "Chat: {customer_link}"
+        )
+
+        session_key = gateway._session_key_for_source(src_dm)
+        fresh_state.active_sessions[session_key] = (
+            "whatsapp", "122299244130458@lid", "Kong", gateway,
+        )
+
+        _, handler = make_trigger_handover_tool(lambda: fresh_state)
+        result = json.loads(handler({"reason": "smoke"}, task_id=session_key))
+        assert result["ok"] is True
+        assert result["owner_notified"] is True
+
+        # Pull the message that was scheduled to the adapter.
+        from gateway.config import Platform
+        adapter = gateway.adapters[Platform("whatsapp")]
+        # asyncio.run already returned by notify_owner -> message present.
+        assert adapter.sent, "owner adapter never received the message"
+        _, message = adapter.sent[-1]
+        assert "wa.me/60173380115" in message
+        assert "60173380115" in message
+        assert "@lid" not in message
+        assert "Reason: smoke" in message
+
+    def test_activate_message_legacy_template_still_works(
+        self, fresh_state, src_dm, gateway
+    ):
+        """Profiles still using the old ``{chat_id}`` template must keep
+        working unchanged — the handler now passes extra kwargs but old
+        tokens still render."""
+        from gateway_policy.tools.trigger_handover import make_trigger_handover_tool
+
+        fresh_state.config.handover.owner.platform = "whatsapp"
+        fresh_state.config.handover.owner.chat_id = "60111111111@s.whatsapp.net"
+        fresh_state.config.handover.notify_on_activate = (
+            "Handover: {customer_name} ({chat_id}). Reason: {reason}"
+        )
+
+        session_key = gateway._session_key_for_source(src_dm)
+        fresh_state.active_sessions[session_key] = (
+            "whatsapp", src_dm.chat_id, "Kong", gateway,
+        )
+
+        _, handler = make_trigger_handover_tool(lambda: fresh_state)
+        result = json.loads(handler({"reason": "x"}, task_id=session_key))
+        assert result["ok"] is True
+        from gateway.config import Platform
+        adapter = gateway.adapters[Platform("whatsapp")]
+        assert adapter.sent
+        _, message = adapter.sent[-1]
+        assert message == f"Handover: Kong ({src_dm.chat_id}). Reason: x"
 
 
 # ---------------------------------------------------------------------------

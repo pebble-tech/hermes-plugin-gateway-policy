@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from ..notify import notify_owner
+from ..notify import format_chat_link, notify_owner
 from ..transcript_utils import silent_ingest
 
 logger = logging.getLogger("gateway-policy.rules.handover")
@@ -55,11 +55,15 @@ def _deactivate(state, gateway, *, platform: str, chat_id: str, source) -> None:
             or getattr(source, "user_id", None)
             or "customer"
         )
+        customer_phone, customer_link = format_chat_link(platform, chat_id)
         message = cfg.notify_on_exit.format(
             customer_name=customer_name,
             chat_id=chat_id,
             platform=platform,
             reason=row.reason,
+            activated_by=row.activated_by or "",
+            customer_phone=customer_phone,
+            customer_link=customer_link,
         )
         notify_owner(
             gateway,

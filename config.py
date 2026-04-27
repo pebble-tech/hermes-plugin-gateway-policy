@@ -30,7 +30,10 @@ Config shape:
             chat_id: "60123456789@s.whatsapp.net"
           timeout_minutes: 60
           exit_command: "/takeback"
-          notify_on_activate: "Handover: {customer_name} in {chat_id}. Reason: {reason}"
+          notify_on_activate: |
+            Handover: {customer_name} ({platform} {customer_phone})
+            Reason: {reason}
+            Chat: {customer_link}
           notify_on_exit: "Handover ended for {customer_name}."
           tool:
             enabled: true
@@ -83,7 +86,9 @@ class HandoverConfig:
     timeout_minutes: int = 60
     exit_command: str = "/takeback"
     notify_on_activate: str = (
-        "Handover: {customer_name} in {chat_id}. Reason: {reason}"
+        "Handover: {customer_name} ({platform} {customer_phone})\n"
+        "Reason: {reason}\n"
+        "Chat: {customer_link}"
     )
     notify_on_exit: str = "Handover ended for {customer_name}."
     tool: ToolConfig = field(default_factory=ToolConfig)

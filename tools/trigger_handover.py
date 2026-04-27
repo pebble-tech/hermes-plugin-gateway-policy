@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from ..notify import notify_owner
+from ..notify import format_chat_link, notify_owner
 
 logger = logging.getLogger("gateway-policy.tools.trigger_handover")
 
@@ -149,12 +149,15 @@ def make_trigger_handover_tool(
         notified = False
         if gateway and cfg.owner.platform and cfg.owner.chat_id:
             customer_name = user_name or "customer"
+            customer_phone, customer_link = format_chat_link(platform, chat_id)
             message = cfg.notify_on_activate.format(
                 customer_name=customer_name,
                 chat_id=chat_id,
                 platform=platform,
                 reason=reason,
                 activated_by="agent",
+                customer_phone=customer_phone,
+                customer_link=customer_link,
             )
             if summary:
                 message = f"{message}\n\nAgent summary: {summary}"

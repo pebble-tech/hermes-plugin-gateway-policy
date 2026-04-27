@@ -9,9 +9,72 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Any, Optional
+from typing import Any, Optional, Tuple
 
 logger = logging.getLogger("gateway-policy.notify")
+
+
+def _strip_whatsapp_suffix(value: str) -> str:
+    """Last-resort canonicalisation: strip ``+``, device tag, and JID/LID
+    suffix to produce something close to a phone number. Lossy but safe."""
+    return (
+        str(value or "")
+        .strip()
+        .replace("+", "", 1)
+        .split(":", 1)[0]
+        .split("@", 1)[0]
+    )
+
+
+def format_chat_link(platform: str, chat_id: str) -> Tuple[str, str]:
+    """Resolve ``(customer_phone, customer_link)`` for owner notifications.
+
+    Per-platform behaviour:
+
+    * ``whatsapp``: canonicalise via ``gateway.whatsapp_identity`` (with a
+      pre-#15191 ``gateway.session`` fallback) so LIDs are walked back to
+      a phone via ``$HERMES_HOME/whatsapp/session/lid-mapping-*.json``.
+      Strip any remaining ``@s.whatsapp.net`` / ``@lid`` / device suffix
+      before formatting a ``https://wa.me/<phone>`` link.
+    * ``telegram``: chat_id is the numeric user_id; emit a
+      ``tg://user?id=<id>`` deep link.
+    * Anything else (discord, matrix, bluebubbles, api_server, …): we have
+      no clean URL form, so return the raw chat_id for both fields.
+
+    Always best-effort — never raises. Empty / falsy input returns
+    ``("", "")`` so the caller can fold it into a format() call without
+    needing to guard.
+    """
+    p = (platform or "").strip().lower()
+    cid = str(chat_id or "").strip()
+    if not cid:
+        return "", ""
+
+    if p == "whatsapp":
+        resolved = cid
+        try:
+            from gateway.whatsapp_identity import canonical_whatsapp_identifier
+
+            resolved = canonical_whatsapp_identifier(cid)
+        except ImportError:
+            try:
+                from gateway.session import canonical_whatsapp_identifier
+
+                resolved = canonical_whatsapp_identifier(cid)
+            except ImportError:
+                resolved = cid
+        except Exception as exc:  # pragma: no cover — defensive
+            logger.debug("whatsapp canonicalize failed: %s", exc)
+            resolved = cid
+        phone = _strip_whatsapp_suffix(resolved)
+        if phone:
+            return phone, f"https://wa.me/{phone}"
+        return phone, cid
+
+    if p == "telegram":
+        return cid, f"tg://user?id={cid}"
+
+    return cid, cid
 
 
 def _resolve_platform(gateway: Any, platform: str):
