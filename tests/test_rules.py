@@ -228,31 +228,31 @@ class TestHandover:
     def test_disabled_returns_none(self, fresh_state, src_dm, session_store, gateway):
         from gateway_policy.rules.handover import handover_rule
         fresh_state.config.handover.enabled = False
-        event = FakeEvent(text="speak to a human", source=src_dm)
+        # Pre-activate to prove `enabled=False` short-circuits even when state exists.
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id, reason="manual", activated_by="test"
+        )
+        event = FakeEvent(text="hello", source=src_dm)
         assert handover_rule(
             event=event, gateway=gateway, session_store=session_store, state=fresh_state
         ) is None
 
-    def test_phrase_triggers_activation_and_silent_ingest(
-        self, fresh_state, src_dm, session_store, gateway
-    ):
+    def test_inactive_chat_passes_through(self, fresh_state, src_dm, session_store, gateway):
+        """No active handover -> rule is a no-op. Activation now happens
+        only via the trigger_handover tool, never from inbound text."""
         from gateway_policy.rules.handover import handover_rule
         event = FakeEvent(text="please let me speak to a human now", source=src_dm)
         result = handover_rule(
             event=event, gateway=gateway, session_store=session_store, state=fresh_state
         )
-        assert result["action"] == "skip"
-        assert "phrase" in result["reason"]
-        # Active in DB.
-        assert fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
-        # Customer message went to transcript.
-        assert len(session_store.appended) == 1
+        assert result is None
+        assert not fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+        assert len(session_store.appended) == 0
 
     def test_active_handover_silent_ingests_subsequent_messages(
         self, fresh_state, src_dm, session_store, gateway
     ):
         from gateway_policy.rules.handover import handover_rule
-        # Pre-activate.
         fresh_state.handovers.activate(
             "whatsapp", src_dm.chat_id, reason="manual", activated_by="test"
         )
@@ -266,21 +266,35 @@ class TestHandover:
     def test_other_platform_skipped(self, fresh_state, session_store, gateway):
         from gateway_policy.rules.handover import handover_rule
         tg = FakeSource(platform_str="telegram", chat_type="dm", chat_id="-100")
-        event = FakeEvent(text="speak to a human", source=tg)
+        event = FakeEvent(text="hi", source=tg)
         # Handover platforms = ['whatsapp'] only.
         assert handover_rule(
             event=event, gateway=gateway, session_store=session_store, state=fresh_state
         ) is None
         assert not fresh_state.handovers.is_active("telegram", "-100")
 
-    def test_phrase_match_case_insensitive(self, fresh_state, src_dm, session_store, gateway):
+    def test_owner_exit_command_in_active_chat_deactivates(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Owner sending /takeback in the customer's chat ends the handover."""
         from gateway_policy.rules.handover import handover_rule
-        event = FakeEvent(text="SPEAK TO A HUMAN", source=src_dm)
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id, reason="manual", activated_by="test"
+        )
+        # Spoof the source so the message looks like it came from the owner.
+        owner_src = FakeSource(
+            platform_str="whatsapp",
+            chat_type="dm",
+            chat_id=src_dm.chat_id,
+            user_id=fresh_state.config.handover.owner.chat_id,
+            user_name="Owner",
+        )
+        event = FakeEvent(text="/takeback", source=owner_src)
         result = handover_rule(
             event=event, gateway=gateway, session_store=session_store, state=fresh_state
         )
-        assert result["action"] == "skip"
-        assert fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+        assert result == {"action": "skip", "reason": "handover_exit"}
+        assert not fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
 
 
 # ---------------------------------------------------------------------------

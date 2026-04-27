@@ -28,20 +28,17 @@ Config shape:
           owner:
             platform: whatsapp
             chat_id: "60123456789@s.whatsapp.net"
-          triggers:
-            phrases:
-              - "speak to a human"
-              - "talk to the owner"
-            llm_classifier:
-              enabled: false
-              dm_only: true
-              prompt: "..."
           timeout_minutes: 60
           exit_command: "/takeback"
           notify_on_activate: "Handover: {customer_name} in {chat_id}. Reason: {reason}"
           notify_on_exit: "Handover ended for {customer_name}."
           tool:
             enabled: true
+
+Handover activation is agent-driven only: the `trigger_handover` tool is
+the sole entry point. Phrase / LLM-classifier gateway-side triggers were
+removed — they were unreliable in multi-language deployments and
+duplicated the main agent's own context-aware judgement.
 """
 
 from __future__ import annotations
@@ -68,24 +65,6 @@ class ChatRef:
 
 
 @dataclass
-class LLMClassifierConfig:
-    enabled: bool = False
-    dm_only: bool = True
-    prompt: str = (
-        "Classify whether this customer message requires human handover. "
-        "Respond with exactly 'yes' or 'no'. A message requires handover if "
-        "the customer explicitly asks to speak to a human, or if they are "
-        "asking for something clearly outside normal self-serve requests."
-    )
-
-
-@dataclass
-class HandoverTriggers:
-    phrases: List[str] = field(default_factory=list)
-    llm_classifier: LLMClassifierConfig = field(default_factory=LLMClassifierConfig)
-
-
-@dataclass
 class OwnerConfig:
     platform: Optional[str] = None
     chat_id: Optional[str] = None
@@ -101,7 +80,6 @@ class HandoverConfig:
     enabled: bool = False
     platforms: List[str] = field(default_factory=lambda: ["whatsapp"])
     owner: OwnerConfig = field(default_factory=OwnerConfig)
-    triggers: HandoverTriggers = field(default_factory=HandoverTriggers)
     timeout_minutes: int = 60
     exit_command: str = "/takeback"
     notify_on_activate: str = (
@@ -205,20 +183,9 @@ def _parse_handover(raw: Dict[str, Any]) -> HandoverConfig:
             chat_id=(str(owner_raw.get("chat_id") or "").strip() or None),
         )
 
-    triggers_raw = raw.get("triggers") or {}
-    triggers = HandoverTriggers()
-    if isinstance(triggers_raw, dict):
-        phrases = triggers_raw.get("phrases") or []
-        if isinstance(phrases, list):
-            triggers.phrases = [str(p).strip() for p in phrases if str(p).strip()]
-        llm_raw = triggers_raw.get("llm_classifier") or {}
-        if isinstance(llm_raw, dict):
-            triggers.llm_classifier = LLMClassifierConfig(
-                enabled=bool(llm_raw.get("enabled", False)),
-                dm_only=bool(llm_raw.get("dm_only", True)),
-                prompt=str(llm_raw.get("prompt") or LLMClassifierConfig().prompt),
-            )
-    cfg.triggers = triggers
+    # `triggers:` (phrases / llm_classifier) used to live here. Removed —
+    # handover is now activated only via the `trigger_handover` agent tool.
+    # Any leftover `triggers:` block in profile config.yaml is ignored.
 
     cfg.timeout_minutes = int(raw.get("timeout_minutes", cfg.timeout_minutes) or 0)
     cfg.exit_command = str(raw.get("exit_command", cfg.exit_command))

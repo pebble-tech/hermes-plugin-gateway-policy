@@ -56,12 +56,13 @@ plugins:
       owner:
         platform: whatsapp
         chat_id: "60123456789@s.whatsapp.net"
-      triggers:
-        phrases: ["speak to a human", "talk to owner"]
       exit_command: "/takeback"
       tool:
         enabled: true
 ```
+
+Handover activates only when the agent calls the `trigger_handover`
+tool. There are no gateway-side phrase or LLM-classifier triggers.
 
 ## 3. Restart the gateway
 
@@ -69,12 +70,12 @@ plugins:
 hermes gateway restart
 ```
 
-## 4. (Optional) Tell the agent when to escalate
+## 4. Tell the agent when to escalate
 
 If you enabled `handover.tool`, the agent can call `trigger_handover`
-mid-conversation. Add a short "out of scope" section to your
-profile's `AGENTS.md` so it knows when — the tool itself is
-intentionally generic.
+mid-conversation. The tool description is intentionally generic, so
+add a short "out of scope" section to your profile's `AGENTS.md`
+spelling out which requests require a human owner.
 
 Full docs: see `README.md` in this plugin directory, or
 [github.com/pebble-tech/hermes-plugin-gateway-policy](https://github.com/pebble-tech/hermes-plugin-gateway-policy).

@@ -4,8 +4,9 @@ Patterns supported out of the box:
 - listen_only: buffer ambient group messages, collapse into the next tagged
   turn, open a follow-up window so contiguous replies don't require re-tagging.
 - handover: silent-ingest customer messages while the owner handles them
-  manually. Activation via phrases, optional aux-LLM classifier, or the
-  `trigger_handover` tool the agent can call mid-conversation.
+  manually. Activation is agent-driven via the ``trigger_handover`` tool;
+  the gateway-side rule only enforces an already-active handover (silent
+  ingest + owner ``/takeback``).
 
 Extension API: external plugins may call `register_rule(fn, priority=50)`
 to add their own pre-dispatch rules without modifying this plugin.

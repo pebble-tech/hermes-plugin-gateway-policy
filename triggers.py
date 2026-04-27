@@ -1,4 +1,11 @@
-"""Trigger detection: mentions, phrase matching, optional LLM classifier."""
+"""Trigger detection helpers.
+
+Currently only bot-mention detection (used by ``rules/listen_only.py``).
+Phrase-matching and the optional LLM classifier paths were removed when
+handover activation was consolidated to the ``trigger_handover`` tool —
+they were unreliable across mixed-language deployments and redundant
+with the main agent's own classification pass.
+"""
 
 from __future__ import annotations
 
@@ -79,62 +86,3 @@ def _strip_id(value: Any) -> str:
         .split(":", 1)[0]
         .split("@", 1)[0]
     )
-
-
-def matches_phrases(text: str, phrases: list[str]) -> Optional[str]:
-    """Return the first matched phrase (case-insensitive, substring), else None."""
-    if not text or not phrases:
-        return None
-    needle = text.lower()
-    for phrase in phrases:
-        if not phrase:
-            continue
-        if phrase.lower() in needle:
-            return phrase
-    return None
-
-
-def llm_classifier_says_handover(prompt: str, message: str) -> Optional[bool]:
-    """Optional LLM classifier via Hermes auxiliary client.
-
-    Returns True/False on a confident classification; None on any error
-    (caller should treat None as "no decision").
-    """
-    text = (message or "").strip()
-    if not text:
-        return False
-    try:
-        from agent.auxiliary_client import call_llm
-    except Exception as exc:
-        logger.warning("auxiliary_client import failed: %s", exc)
-        return None
-
-    full_prompt = (
-        f"{prompt}\n\n"
-        f"Customer message:\n```\n{text}\n```\n\n"
-        "Reply with exactly one word: 'yes' or 'no'."
-    )
-    try:
-        result = call_llm(
-            task="gateway_policy_classifier",
-            prompt=full_prompt,
-            max_tokens=4,
-        )
-    except Exception as exc:
-        logger.warning("call_llm classifier failed: %s", exc)
-        return None
-
-    raw = ""
-    if isinstance(result, str):
-        raw = result
-    elif isinstance(result, dict):
-        raw = str(result.get("text") or result.get("content") or "")
-    else:
-        raw = str(result or "")
-    raw = raw.strip().lower().strip(".!?\"' ")
-    if raw.startswith("yes"):
-        return True
-    if raw.startswith("no"):
-        return False
-    logger.debug("classifier returned ambiguous response: %r", raw)
-    return None

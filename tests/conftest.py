@@ -117,7 +117,6 @@ def session_store():
 def fresh_state(tmp_path, monkeypatch):
     from gateway_policy.config import (
         HandoverConfig,
-        HandoverTriggers,
         ListenOnlyConfig,
         OwnerConfig,
         PolicyConfig,
@@ -134,7 +133,6 @@ def fresh_state(tmp_path, monkeypatch):
             enabled=True,
             platforms=["whatsapp"],
             owner=OwnerConfig(platform="whatsapp", chat_id="60111111111@s.whatsapp.net"),
-            triggers=HandoverTriggers(phrases=["speak to a human", "talk to owner"]),
             timeout_minutes=10,
             tool=ToolConfig(enabled=True),
         ),
