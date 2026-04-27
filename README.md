@@ -10,9 +10,9 @@ touching any business-logic plugin:
    customer-service group chats where the bot shouldn't react to
    every message but needs the preceding context when it does.
 2. **handover** — silent-ingest customer messages while the owner
-   handles the chat manually. Activation via phrases, optional
-   aux-LLM classifier, or the `trigger_handover` tool the agent
-   itself can call mid-conversation.
+   handles the chat manually. Activation is agent-driven via the
+   `trigger_handover` tool; the gateway-side rule only enforces an
+   already-active handover (silent ingest + owner `/takeback`).
 
 Both patterns are profile-agnostic — install once, configure per
 profile via `config.yaml`. Works across every gateway platform
@@ -122,12 +122,14 @@ plugins:
       owner:
         platform: whatsapp
         chat_id: "60123456789@s.whatsapp.net"
-      triggers:
-        phrases: ["speak to a human", "talk to owner"]
       exit_command: "/takeback"
       tool:
         enabled: true
 ```
+
+Handover only activates when the agent calls `trigger_handover`. There
+is no gateway-side phrase or LLM-classifier trigger — tell the agent
+*when* to escalate via your `AGENTS.md` (see the next section).
 
 Profile isolation is automatic — Hermes resolves
 `get_hermes_home()` to the active profile, so each profile gets its
@@ -265,7 +267,7 @@ hermes-plugin-gateway-policy/
 ├── __init__.py              # plugin entry: register() + register_rule()
 ├── config.py                # dataclass config loader
 ├── state.py                 # PolicyState + SQLite HandoverStore
-├── triggers.py              # phrase / LLM classifier helpers
+├── triggers.py              # bot-mention helpers (used by listen_only)
 ├── notify.py                # owner notification helpers
 ├── transcript_utils.py      # silent-ingest helpers
 ├── rules/
@@ -274,7 +276,7 @@ hermes-plugin-gateway-policy/
 │   └── handover.py
 ├── tools/
 │   └── trigger_handover.py  # tool schema + handler
-├── tests/                   # pytest suite (17 tests)
+├── tests/                   # pytest suite
 ├── pyproject.toml           # dev-tool config (pytest, ruff)
 ├── LICENSE
 ├── .gitignore
