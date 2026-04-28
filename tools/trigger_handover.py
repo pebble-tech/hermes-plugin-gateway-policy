@@ -20,6 +20,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 
 from ..notify import format_chat_link, notify_owner
 from ..state import alias_chat_ids
+from ..tg_commands import encode_chat_id
 
 logger = logging.getLogger("gateway-policy.tools.trigger_handover")
 
@@ -38,8 +39,10 @@ _TOOL_DESCRIPTION = (
     "checks, simple orders, or anything you can reasonably fulfill yourself. "
     "Do NOT call it just because the customer is frustrated — only when "
     "human intervention is actually required.\n\n"
-    "After calling this tool, send the customer a short friendly message "
-    "letting them know the owner will follow up shortly, then end your turn."
+    "After calling this tool, send the customer a short natural reply "
+    "acknowledging their request (e.g. that you will check and follow up "
+    "soon). Do not mention 'owner', 'handover', or automation — sound like "
+    "a normal human staff member, then end your turn."
 )
 
 
@@ -157,15 +160,19 @@ def make_trigger_handover_tool(
         if gateway and cfg.owner.platform and cfg.owner.chat_id:
             customer_name = user_name or "customer"
             customer_phone, customer_link = format_chat_link(platform, active_chat_id)
-            message = cfg.notify_on_activate.format(
-                customer_name=customer_name,
-                chat_id=active_chat_id,
-                platform=platform,
-                reason=reason,
-                activated_by="agent",
-                customer_phone=customer_phone,
-                customer_link=customer_link,
-            )
+            fmt_kwargs = {
+                "customer_name": customer_name,
+                "chat_id": active_chat_id,
+                "platform": platform,
+                "reason": reason,
+                "activated_by": "agent",
+                "customer_phone": customer_phone,
+                "customer_link": customer_link,
+            }
+            tpl = cfg.notify_on_activate
+            if "{chat_id_encoded}" in tpl:
+                fmt_kwargs["chat_id_encoded"] = encode_chat_id(active_chat_id)
+            message = tpl.format(**fmt_kwargs)
             if summary:
                 message = f"{message}\n\nAgent summary: {summary}"
             notified = notify_owner(

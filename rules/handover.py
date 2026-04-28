@@ -75,7 +75,16 @@ def _is_owner_message(event: Any, owner_platform: Optional[str], owner_chat_id: 
     return str(sender) == owner_chat_id
 
 
-def _deactivate(state, gateway, session_store, *, platform: str, chat_id: str, source) -> None:
+def _deactivate(
+    state,
+    gateway,
+    session_store,
+    *,
+    platform: str,
+    chat_id: str,
+    source,
+    notify_owner_on_exit: bool = True,
+) -> None:
     cfg = state.config.handover
     row = state.handovers.deactivate(platform, chat_id)
     if not row:
@@ -88,7 +97,11 @@ def _deactivate(state, gateway, session_store, *, platform: str, chat_id: str, s
         text=HANDOVER_ENDED_NOTE,
         kind="handover_ended",
     )
-    if cfg.owner.platform and cfg.owner.chat_id:
+    if (
+        notify_owner_on_exit
+        and cfg.owner.platform
+        and cfg.owner.chat_id
+    ):
         customer_name = (
             getattr(source, "user_name", None)
             or getattr(source, "user_id", None)
@@ -174,6 +187,7 @@ def handover_rule(*, event, gateway, session_store, state, **_kwargs) -> Optiona
             platform=platform,
             chat_id=stored_chat_id,
             source=source,
+            notify_owner_on_exit=True,
         )
         return {"action": "skip", "reason": "handover_exit"}
 

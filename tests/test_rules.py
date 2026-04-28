@@ -1153,6 +1153,235 @@ class TestNotifyTokens:
         _, message = adapter.sent[-1]
         assert message == f"Handover: Kong ({src_dm.chat_id}). Reason: x"
 
+    def test_activate_message_includes_chat_id_encoded_when_in_template(
+        self, fresh_state, src_dm, gateway, monkeypatch
+    ):
+        import sys
+        import types
+
+        from gateway_policy.tools.trigger_handover import make_trigger_handover_tool
+
+        fake_mod = types.ModuleType("gateway.whatsapp_identity")
+        fake_mod.canonical_whatsapp_identifier = lambda v: "60173380115"
+        sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+        monkeypatch.setitem(sys.modules, "gateway.whatsapp_identity", fake_mod)
+
+        fresh_state.config.handover.owner.platform = "whatsapp"
+        fresh_state.config.handover.owner.chat_id = "60111111111@s.whatsapp.net"
+        fresh_state.config.handover.notify_on_activate = (
+            "Chat: {chat_id}\nEnc: /takeback_{chat_id_encoded}"
+        )
+
+        session_key = gateway._session_key_for_source(src_dm)
+        fresh_state.active_sessions[session_key] = (
+            "whatsapp",
+            "122299244130458@lid",
+            "Kong",
+            gateway,
+        )
+
+        _, handler = make_trigger_handover_tool(lambda: fresh_state)
+        result = json.loads(handler({"reason": "smoke"}, task_id=session_key))
+        assert result["ok"] is True
+
+        from gateway.config import Platform
+
+        adapter = gateway.adapters[Platform("whatsapp")]
+        _, message = adapter.sent[-1]
+        assert "/takeback_122299244130458_AT_lid" in message
+        assert "122299244130458@lid" in message
+
+
+# ---------------------------------------------------------------------------
+# Telegram owner slash-commands
+# ---------------------------------------------------------------------------
+
+
+class TestTelegramOwnerCommands:
+    def test_owner_takeback_active_deactivates(
+        self, fresh_state, src_dm, session_store, gateway_wa_tg
+    ):
+        from gateway.config import Platform
+        from gateway_policy.rules.telegram_owner_commands import (
+            telegram_owner_commands_rule,
+        )
+        from gateway_policy.tg_commands import encode_chat_id
+
+        fresh_state.config.handover.owner.platform = "telegram"
+        fresh_state.config.handover.owner.chat_id = "640466638"
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id, reason="r", activated_by="t"
+        )
+        owner_tg = FakeSource(
+            platform_str="telegram",
+            chat_type="dm",
+            chat_id="640466638",
+            user_id="640466638",
+        )
+        tok = encode_chat_id(src_dm.chat_id)
+        event = FakeEvent(text=f"/takeback_{tok}", source=owner_tg)
+        result = telegram_owner_commands_rule(
+            event=event,
+            gateway=gateway_wa_tg,
+            session_store=session_store,
+            state=fresh_state,
+        )
+        assert result == {"action": "skip", "reason": "owner_telegram_command"}
+        assert not fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+        adapter = gateway_wa_tg.adapters[Platform("telegram")]
+        assert adapter.sent
+        assert "Takeback complete" in adapter.sent[-1][1]
+        assert any(
+            isinstance(msg.get("content"), str)
+            and msg["content"].startswith("[handover-ended]")
+            for _sid, msg in session_store.appended
+        )
+
+    def test_owner_takeback_no_handover_warns(
+        self, fresh_state, src_dm, session_store, gateway_wa_tg
+    ):
+        from gateway.config import Platform
+        from gateway_policy.rules.telegram_owner_commands import (
+            telegram_owner_commands_rule,
+        )
+        from gateway_policy.tg_commands import encode_chat_id
+
+        fresh_state.config.handover.owner.platform = "telegram"
+        fresh_state.config.handover.owner.chat_id = "640466638"
+        owner_tg = FakeSource(
+            platform_str="telegram",
+            chat_type="dm",
+            chat_id="640466638",
+            user_id="640466638",
+        )
+        tok = encode_chat_id(src_dm.chat_id)
+        event = FakeEvent(text=f"/takeback_{tok}", source=owner_tg)
+        result = telegram_owner_commands_rule(
+            event=event,
+            gateway=gateway_wa_tg,
+            session_store=session_store,
+            state=fresh_state,
+        )
+        assert result == {"action": "skip", "reason": "owner_telegram_command"}
+        adapter = gateway_wa_tg.adapters[Platform("telegram")]
+        assert "No active handover" in adapter.sent[-1][1]
+
+    def test_owner_handover_idle_no_customer_notify(
+        self, fresh_state, src_dm, session_store, gateway_wa_tg
+    ):
+        from gateway.config import Platform
+        from gateway_policy.rules.telegram_owner_commands import (
+            telegram_owner_commands_rule,
+        )
+        from gateway_policy.tg_commands import encode_chat_id
+
+        fresh_state.config.handover.owner.platform = "telegram"
+        fresh_state.config.handover.owner.chat_id = "640466638"
+        owner_tg = FakeSource(
+            platform_str="telegram",
+            chat_type="dm",
+            chat_id="640466638",
+            user_id="640466638",
+        )
+        tok = encode_chat_id(src_dm.chat_id)
+        event = FakeEvent(text=f"/handover_{tok}", source=owner_tg)
+        result = telegram_owner_commands_rule(
+            event=event,
+            gateway=gateway_wa_tg,
+            session_store=session_store,
+            state=fresh_state,
+        )
+        assert result == {"action": "skip", "reason": "owner_telegram_command"}
+        assert fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+        wa = gateway_wa_tg.adapters[Platform("whatsapp")]
+        assert not wa.sent
+        tg = gateway_wa_tg.adapters[Platform("telegram")]
+        assert tg.sent
+        assert "Handover active" in tg.sent[-1][1]
+
+    def test_non_owner_telegram_does_not_skip(
+        self, fresh_state, src_dm, session_store, gateway_wa_tg
+    ):
+        from gateway_policy.rules.telegram_owner_commands import (
+            telegram_owner_commands_rule,
+        )
+        from gateway_policy.tg_commands import encode_chat_id
+
+        fresh_state.config.handover.owner.platform = "telegram"
+        fresh_state.config.handover.owner.chat_id = "640466638"
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id, reason="r", activated_by="t"
+        )
+        stranger = FakeSource(
+            platform_str="telegram",
+            chat_type="dm",
+            chat_id="999",
+            user_id="999",
+        )
+        tok = encode_chat_id(src_dm.chat_id)
+        event = FakeEvent(text=f"/takeback_{tok}", source=stranger)
+        assert (
+            telegram_owner_commands_rule(
+                event=event,
+                gateway=gateway_wa_tg,
+                session_store=session_store,
+                state=fresh_state,
+            )
+            is None
+        )
+        assert fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+
+    def test_owner_normal_text_not_command(
+        self, fresh_state, session_store, gateway_wa_tg
+    ):
+        from gateway_policy.rules.telegram_owner_commands import (
+            telegram_owner_commands_rule,
+        )
+
+        fresh_state.config.handover.owner.platform = "telegram"
+        fresh_state.config.handover.owner.chat_id = "640466638"
+        owner_tg = FakeSource(
+            platform_str="telegram",
+            chat_type="dm",
+            chat_id="640466638",
+            user_id="640466638",
+        )
+        event = FakeEvent(text="status please", source=owner_tg)
+        assert (
+            telegram_owner_commands_rule(
+                event=event,
+                gateway=gateway_wa_tg,
+                session_store=session_store,
+                state=fresh_state,
+            )
+            is None
+        )
+
+    def test_whatsapp_inbound_encoded_takeback_not_telegram_layer(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        from gateway_policy.rules.telegram_owner_commands import (
+            telegram_owner_commands_rule,
+        )
+        from gateway_policy.tg_commands import encode_chat_id
+
+        fresh_state.config.handover.owner.platform = "telegram"
+        fresh_state.config.handover.owner.chat_id = "640466638"
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id, reason="r", activated_by="t"
+        )
+        tok = encode_chat_id(src_dm.chat_id)
+        event = FakeEvent(text=f"/takeback_{tok}", source=src_dm)
+        assert (
+            telegram_owner_commands_rule(
+                event=event,
+                gateway=gateway,
+                session_store=session_store,
+                state=fresh_state,
+            )
+            is None
+        )
+
 
 # ---------------------------------------------------------------------------
 # boundary notes on handover deactivation

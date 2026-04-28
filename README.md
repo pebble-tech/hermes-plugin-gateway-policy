@@ -11,8 +11,9 @@ touching any business-logic plugin:
    every message but needs the preceding context when it does.
 2. **handover** — silent-ingest customer messages while the owner
    handles the chat manually. Activation is agent-driven via the
-   `trigger_handover` tool; the gateway-side rule only enforces an
-   already-active handover (silent ingest + owner `/takeback`).
+   `trigger_handover` tool (or owner-implicit WhatsApp / owner Telegram
+   slash-commands); the gateway-side rules enforce an active handover
+   (silent ingest + owner `/takeback` or Telegram `/takeback_<id>`).
 
 Both patterns are profile-agnostic — install once, configure per
 profile via `config.yaml`. Works across every gateway platform
@@ -192,7 +193,7 @@ Priority conventions:
 |-------|-----|
 | 0-29  | High-priority overrides (VIP, global allowlists) |
 | 30-49 | Profile-specific pre-rules |
-| 50-79 | Built-in (`listen_only=50`, `handover=60`) |
+| 50-79 | Built-in (`listen_only=50`, `telegram_owner_commands=55`, `handover=60`) |
 | 80+   | Observers / logging only |
 
 The first rule returning a non-None action dict wins; remaining
@@ -269,10 +270,12 @@ hermes-plugin-gateway-policy/
 ├── state.py                 # PolicyState + SQLite HandoverStore
 ├── triggers.py              # bot-mention helpers (used by listen_only)
 ├── notify.py                # owner notification helpers
+├── tg_commands.py           # Telegram /handover_ /takeback_ encoding + parse
 ├── transcript_utils.py      # silent-ingest helpers
 ├── rules/
 │   ├── base.py              # rule registry + pipeline runner
 │   ├── listen_only.py
+│   ├── telegram_owner_commands.py
 │   └── handover.py
 ├── tools/
 │   └── trigger_handover.py  # tool schema + handler

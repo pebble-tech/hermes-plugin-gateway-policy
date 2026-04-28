@@ -66,7 +66,8 @@ plugins:
       exit_command: "/takeback"
 
       # Notification templates. Available placeholders:
-      #   {customer_name} {chat_id} {platform} {reason} {activated_by}
+      #   {customer_name} {chat_id} {chat_id_encoded} {platform} {reason}
+      #   {activated_by}
       #   {customer_phone}  — normalized phone (digits only). For WhatsApp
       #                       this resolves LIDs via the bridge mapping; for
       #                       Telegram it's the numeric user_id; for other
@@ -74,10 +75,20 @@ plugins:
       #   {customer_link}   — clickable platform deep link. WhatsApp →
       #                       https://wa.me/<phone>; Telegram →
       #                       tg://user?id=<id>; otherwise raw chat_id.
+      #   {chat_id_encoded} — chat id with ``@``→``_AT_`` and ``.``→``_DOT_``
+      #                       so it fits Telegram tappable /commands (omit
+      #                       this line from the template if you do not use it).
+      #
+      # When ``owner.platform`` is ``telegram``, you can add a tappable
+      # ``/takeback_{chat_id_encoded}`` line so the owner can re-enable the bot
+      # from the Telegram notification. Symmetric ``/handover_{chat_id_encoded}``
+      # also works from the owner's Telegram DM with the bot.
       notify_on_activate: |
         Handover: {customer_name} ({platform} {customer_phone})
         Reason: {reason}
         Chat: {customer_link}
+
+        /takeback_{chat_id_encoded} — re-enable bot
       notify_on_exit: "Handover ended for {customer_name}."
 
       # Register trigger_handover as a tool the agent can call.

@@ -143,3 +143,9 @@ def fresh_state(tmp_path, monkeypatch):
 @pytest.fixture
 def gateway():
     return _FakeGateway(platforms=("whatsapp",))
+
+
+@pytest.fixture
+def gateway_wa_tg():
+    """WhatsApp + Telegram adapters (owner notify on Telegram)."""
+    return _FakeGateway(platforms=("whatsapp", "telegram"))

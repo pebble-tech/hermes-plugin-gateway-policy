@@ -61,8 +61,18 @@ plugins:
         enabled: true
 ```
 
-Handover activates only when the agent calls the `trigger_handover`
-tool. There are no gateway-side phrase or LLM-classifier triggers.
+Handover activates when the agent calls the `trigger_handover` tool,
+when the owner types in the customer's WhatsApp (adapter forwards owner
+messages), or when the owner sends ``/handover_<encoded_chat_id>`` from
+their configured **Telegram** DM with the bot (``owner.platform:
+telegram``). There are no gateway-side phrase or LLM-classifier triggers.
+
+**Telegram tappable commands:** WhatsApp chat ids contain ``@`` and ``.``,
+which Telegram does not treat as linkified ``/commands``. The plugin
+encodes them (``@``→``_AT_``, ``.``→``_DOT_``) in ``{chat_id_encoded}``
+for templates such as ``/takeback_{chat_id_encoded}``. The owner can also
+send ``/takeback_<same_encoding>`` to end a handover without notifying the
+customer (silent resume on the next inbound message).
 
 ## 3. Restart the gateway
 

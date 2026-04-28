@@ -35,6 +35,7 @@ else:
     from .rules.base import clear_rules, list_rules, register_rule, run_pipeline
     from .rules.handover import handover_rule
     from .rules.listen_only import listen_only_rule
+    from .rules.telegram_owner_commands import telegram_owner_commands_rule
     from .state import PolicyState
     from .tools.trigger_handover import make_trigger_handover_tool
 
@@ -106,6 +107,11 @@ else:
         # Reset to built-in rules on every register() (safe for reload scenarios).
         clear_rules()
         register_rule(listen_only_rule, priority=50, name="listen_only")
+        register_rule(
+            telegram_owner_commands_rule,
+            priority=55,
+            name="telegram_owner_commands",
+        )
         register_rule(handover_rule, priority=60, name="handover")
 
         ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)
