@@ -136,6 +136,9 @@ class HandoverStore:
                 isolation_level=None,  # autocommit
             )
             self._conn.execute("PRAGMA journal_mode=WAL")
+            # Wait on transient SQLite locks rather than failing fast — avoids
+            # OperationalError contention between gateway and agent on handover_rule.
+            self._conn.execute("PRAGMA busy_timeout=5000")
         return self._conn
 
     def _ensure_schema(self) -> None:

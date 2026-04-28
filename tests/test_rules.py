@@ -1352,6 +1352,20 @@ class TestHandoverBoundaryNote:
         assert store.expire_stale("whatsapp", ["expired@lid"]) == []
 
 
+class TestHandoverStoreConnection:
+    def test_sqlite_pragmas_busy_timeout_and_wal(self, tmp_path):
+        from gateway_policy.state import HandoverStore
+
+        store = HandoverStore(tmp_path / "conn_test.db")
+        with store._lock:
+            conn = store._connect()
+            conn.execute("SELECT 1").fetchone()
+            busy_ms = conn.execute("PRAGMA busy_timeout").fetchone()[0]
+            journal = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        assert busy_ms >= 5000
+        assert journal.lower() == "wal"
+
+
 # ---------------------------------------------------------------------------
 # rule pipeline
 # ---------------------------------------------------------------------------
