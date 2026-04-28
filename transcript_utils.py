@@ -16,11 +16,12 @@ logger = logging.getLogger("gateway-policy.transcript")
 
 _OWNER_REPLY_PREFIX = "[owner reply] "
 
-# Boundary-note text used when a handover ends.  Lives here so the rule
-# layer and tests share one source of truth.  The bracketed prefix is
-# what the AGENTS.md handover policy teaches the agent to recognise.
-HANDOVER_ENDED_NOTE = (
-    "[handover-ended] The previous handover for this chat has ended. "
+# Boundary-note text used when a takeover ends (owner hands the chat back
+# to the bot). The bracketed prefix is what AGENTS.md teaches the agent
+# to recognise. Legacy sessions may still contain ``[handover-ended]``;
+# treat both as equivalent until those transcripts rotate out.
+TAKEOVER_ENDED_NOTE = (
+    "[takeover-ended] The previous takeover for this chat has ended. "
     "Resume normal assistant behaviour. Do not reference earlier turns "
     "about the owner being notified — those messages are stale; treat "
     "the chat as live again from the next customer message."
@@ -103,10 +104,10 @@ def append_boundary_note(
     """Write a one-off boundary marker into the chat's transcript.
 
     Used to mark transitions the agent would otherwise infer wrongly from
-    its own past turns — e.g. a handover ending mid-session leaves the
+    its own past turns — e.g. a takeover ending mid-session leaves the
     transcript full of "owner has been notified" assistant turns that bias
-    the next reply. A clearly-tagged ``role=user`` note (``[handover-ended]
-    ...``) gives the model an explicit "ignore prior handover talk" cue
+    the next reply. A clearly-tagged ``role=user`` note (``[takeover-ended]
+    ...``) gives the model an explicit "ignore prior takeover-era talk" cue
     on the next replay.
 
     ``role: "user"`` rather than ``"system"`` because mid-stream system

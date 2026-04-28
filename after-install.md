@@ -3,7 +3,7 @@
 Two pre-dispatch patterns are now available for this profile:
 
 - **listen_only** — buffer ambient group messages; collapse on tag; follow-up window.
-- **handover** — silent-ingest while the owner handles the chat manually.
+- **takeover / handover** — while the owner has taken over (`takeover`), the bot silently ingests customer messages until the owner **hands back** (`handover`).
 
 Neither is active until you configure it.
 
@@ -44,7 +44,7 @@ whatsapp:
     - "120363xxxxxxxxxxxx@g.us"   # required: let ambient msgs reach gateway
 ```
 
-**Handover on customer DMs:**
+**Takeover on customer DMs:**
 
 ```yaml
 plugins:
@@ -56,23 +56,23 @@ plugins:
       owner:
         platform: whatsapp
         chat_id: "60123456789@s.whatsapp.net"
-      exit_command: "/takeback"
+      exit_command: /handover
       tool:
         enabled: true
 ```
 
-Handover activates when the agent calls the `trigger_handover` tool,
-when the owner types in the customer's WhatsApp (adapter forwards owner
-messages), or when the owner sends ``/handover_<encoded_chat_id>`` from
-their configured **Telegram** DM with the bot (``owner.platform:
-telegram``). There are no gateway-side phrase or LLM-classifier triggers.
+The agent calls `trigger_takeover` when a human owner should handle the chat.
+Owners can take over implicitly (e.g. typing in WhatsApp with owner forwarding enabled),
+via ``/takeover_<encoded_chat_id>`` from the configured owner **Telegram** DM, or resume the bot with
+``/handover_<encoded_chat_id>`` — or ``/handover`` in the customer chat on WhatsApp.
+There are no gateway-side phrase or LLM-classifier triggers.
 
 **Telegram tappable commands:** WhatsApp chat ids contain ``@`` and ``.``,
 which Telegram does not treat as linkified ``/commands``. The plugin
-encodes them (``@``→``_AT_``, ``.``→``_DOT_``) in ``{chat_id_encoded}``
-for templates such as ``/takeback_{chat_id_encoded}``. The owner can also
-send ``/takeback_<same_encoding>`` to end a handover without notifying the
-customer (silent resume on the next inbound message).
+encodes them (``@``→``_AT_``, ``.``→``_DOT_``). Owner notifications include
+both ``/takeover_*`` (silence bot) and ``/handover_*`` (resume bot) lines.
+
+**Notifications** are fixed strings in ``notify.py`` — not configurable via YAML.
 
 ## 3. Restart the gateway
 
@@ -82,7 +82,7 @@ hermes gateway restart
 
 ## 4. Tell the agent when to escalate
 
-If you enabled `handover.tool`, the agent can call `trigger_handover`
+If you enabled `handover.tool`, the agent can call `trigger_takeover`
 mid-conversation. The tool description is intentionally generic, so
 add a short "out of scope" section to your profile's `AGENTS.md`
 spelling out which requests require a human owner.

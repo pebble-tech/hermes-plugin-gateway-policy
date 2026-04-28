@@ -1,8 +1,11 @@
 """Owner-notification helper.
 
-Sends a one-off message via a Hermes gateway adapter. Used by the handover
-flow to alert the owner when a customer triggers handover, and to confirm
-takeback. Best-effort: a missing adapter or send failure logs and returns.
+Sends a one-off message via a Hermes gateway adapter. Used by the takeover
+flow to alert the owner when a takeover activates or ends. Best-effort: a
+missing adapter or send failure logs and returns.
+
+Notification bodies are hardcoded constants below — they are not configurable
+via config.yaml; change them here if you need different wording.
 """
 
 from __future__ import annotations
@@ -12,6 +15,40 @@ import logging
 from typing import Any, Optional, Tuple
 
 logger = logging.getLogger("gateway-policy.notify")
+
+# Owner-facing Telegram/WhatsApp texts (not profile-configurable).
+NOTIFY_ON_ACTIVATE_TEMPLATE = """Takeover: {customer_name}
+Phone: {customer_phone}
+Reason: {reason}
+{customer_link}
+
+/takeover_{chat_id_encoded} — silence bot
+/handover_{chat_id_encoded} — resume bot"""
+
+NOTIFY_ON_EXIT_TEMPLATE = "Takeover ended for {customer_name}."
+
+
+def format_notify_on_activate(
+    *,
+    customer_name: str,
+    customer_phone: str,
+    customer_link: str,
+    reason: str,
+    chat_id_encoded: str,
+) -> str:
+    """Render the standard owner notification when a takeover becomes active."""
+    return NOTIFY_ON_ACTIVATE_TEMPLATE.format(
+        customer_name=customer_name,
+        customer_phone=customer_phone,
+        customer_link=customer_link,
+        reason=reason,
+        chat_id_encoded=chat_id_encoded,
+    )
+
+
+def format_notify_on_exit(*, customer_name: str) -> str:
+    """Render the standard owner notification when a takeover ends."""
+    return NOTIFY_ON_EXIT_TEMPLATE.format(customer_name=customer_name)
 
 
 def _strip_whatsapp_suffix(value: str) -> str:

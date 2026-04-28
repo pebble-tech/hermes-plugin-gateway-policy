@@ -38,60 +38,31 @@ plugins:
         # - { platform: telegram, chat_id: "-1001234567890" }
 
     # -----------------------------------------------------------------
-    # handover: silent-ingest while the owner handles the chat.
+    # handover: takeover semantics (owner silences bot) + resume (hand
+    # chat back to bot). See README for terminology.
     #
-    # Activation is agent-driven only — the bot calls the
-    # ``trigger_handover`` tool when the conversation needs a human.
-    # Gateway-side phrase / LLM classifier triggers were removed
-    # (unreliable across languages, redundant with the agent's own
-    # judgement). Tell the agent *when* to escalate via your AGENTS.md.
+    # Activation is agent-driven via ``trigger_takeover``. Owner
+    # notifications are hardcoded in ``notify.py`` (not configurable).
     # -----------------------------------------------------------------
     handover:
       enabled: false               # explicit opt-in
 
-      # Platforms to enable handover on.
+      # Platforms where takeover applies.
       platforms: [whatsapp]
 
-      # Where to notify when a handover activates.
+      # Where to send owner notifications (Telegram DM, WhatsApp to owner, …).
       owner:
         platform: whatsapp
         chat_id: "60123456789@s.whatsapp.net"
 
-      # Auto-expire active handovers after this many minutes.
-      # 0 = never expire (owner must /takeback manually).
+      # Auto-expire active takeovers after this many minutes.
+      # 0 = never expire (owner must /handover manually to resume the bot).
       timeout_minutes: 60
 
-      # Command the owner sends (from their own account, in the same chat)
-      # to end the handover and return control to the bot.
-      exit_command: "/takeback"
+      # Command the owner sends in the **customer chat** (from their own
+      # account) to hand the chat back to the bot (resume replies).
+      exit_command: "/handover"
 
-      # Notification templates. Available placeholders:
-      #   {customer_name} {chat_id} {chat_id_encoded} {platform} {reason}
-      #   {activated_by}
-      #   {customer_phone}  — normalized phone (digits only). For WhatsApp
-      #                       this resolves LIDs via the bridge mapping; for
-      #                       Telegram it's the numeric user_id; for other
-      #                       platforms it's the raw chat_id.
-      #   {customer_link}   — clickable platform deep link. WhatsApp →
-      #                       https://wa.me/<phone>; Telegram →
-      #                       tg://user?id=<id>; otherwise raw chat_id.
-      #   {chat_id_encoded} — chat id with ``@``→``_AT_`` and ``.``→``_DOT_``
-      #                       so it fits Telegram tappable /commands (omit
-      #                       this line from the template if you do not use it).
-      #
-      # When ``owner.platform`` is ``telegram``, you can add a tappable
-      # ``/takeback_{chat_id_encoded}`` line so the owner can re-enable the bot
-      # from the Telegram notification. Symmetric ``/handover_{chat_id_encoded}``
-      # also works from the owner's Telegram DM with the bot.
-      notify_on_activate: |
-        Handover: {customer_name} ({platform} {customer_phone})
-        Reason: {reason}
-        Chat: {customer_link}
-
-        /takeback_{chat_id_encoded} — re-enable bot
-      notify_on_exit: "Handover ended for {customer_name}."
-
-      # Register trigger_handover as a tool the agent can call.
-      # Guidance for *when* to call belongs in your AGENTS.md.
+      # Register trigger_takeover as a tool the agent can call.
       tool:
         enabled: true

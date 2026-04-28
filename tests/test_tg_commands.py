@@ -31,33 +31,33 @@ class TestEncodeDecode:
 
 
 class TestParseOwnerCommand:
-    def test_takeback_encoded_lid(self):
-        assert parse_owner_command("/takeback_122299244130458_AT_lid") == (
-            "takeback",
+    def test_handover_encoded_lid_resume_bot(self):
+        assert parse_owner_command("/handover_122299244130458_AT_lid") == (
+            "handover",
             "122299244130458@lid",
         )
 
-    def test_handover_numeric(self):
-        assert parse_owner_command("/handover_60173380115") == (
-            "handover",
+    def test_takeover_numeric_silence_bot(self):
+        assert parse_owner_command("/takeover_60173380115") == (
+            "takeover",
             "60173380115",
         )
 
     def test_extra_arg_no_match(self):
         assert (
-            parse_owner_command("/takeback_foo@bot 122299244130458_AT_lid")
+            parse_owner_command("/takeover_foo@bot 122299244130458_AT_lid")
             is None
         )
 
     def test_strip_bot_prefix_in_verb(self):
         assert parse_owner_command(
-            "/takeback@hermesbot_122299244130458_AT_lid"
-        ) == ("takeback", "122299244130458@lid")
+            "/handover@hermesbot_122299244130458_AT_lid"
+        ) == ("handover", "122299244130458@lid")
 
     def test_random_no_match(self):
         assert parse_owner_command("/random_text") is None
 
     def test_trailing_bot_suffix_stripped(self):
         assert parse_owner_command(
-            "/takeback_122299244130458_AT_lid@hermesbot"
-        ) == ("takeback", "122299244130458@lid")
+            "/handover_122299244130458_AT_lid@hermesbot"
+        ) == ("handover", "122299244130458@lid")

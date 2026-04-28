@@ -1,4 +1,4 @@
-"""Owner-only Telegram slash commands: ``/handover_<chat>`` / ``/takeback_<chat>``."""
+"""Owner-only Telegram slash commands: ``/takeover_<chat>`` / ``/handover_<chat>``."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ import logging
 from types import SimpleNamespace
 from typing import Any, Dict, Optional
 
-from ..notify import format_chat_link, notify_owner
+from ..notify import format_chat_link, format_notify_on_activate, notify_owner
 from ..state import alias_chat_ids
-from ..tg_commands import parse_owner_command
-from .handover import _deactivate, _platform_str
+from ..tg_commands import encode_chat_id, parse_owner_command
+from .takeover import _deactivate_takeover, _platform_str
 
 logger = logging.getLogger("gateway-policy.rules.telegram_owner_commands")
 
@@ -73,13 +73,13 @@ def telegram_owner_commands_rule(
         return None
 
     candidates = alias_chat_ids(customer_platform, target_chat_id)
-    state.handovers.expire_stale(customer_platform, candidates)
-    active_row = state.handovers.find_active(customer_platform, candidates)
+    state.takeovers.expire_stale(customer_platform, candidates)
+    active_row = state.takeovers.find_active(customer_platform, candidates)
     stored_chat_id = active_row.chat_id if active_row else target_chat_id
 
-    if action == "takeback":
+    if action == "handover":
         if not active_row:
-            warn = f"⚠ No active handover for {target_chat_id}."
+            warn = f"⚠ No active takeover for {target_chat_id}."
             notify_owner(
                 gateway,
                 owner_platform=cfg.owner.platform,
@@ -98,7 +98,7 @@ def telegram_owner_commands_rule(
             stored_chat_id,
             user_name=None,
         )
-        _deactivate(
+        _deactivate_takeover(
             state,
             gateway,
             session_store,
@@ -108,7 +108,7 @@ def telegram_owner_commands_rule(
             notify_owner_on_exit=False,
         )
         ok = (
-            f"✓ Takeback complete: {label}. Bot is responding again."
+            f"✓ Handover complete: {label}. Bot is responding again."
         )
         notify_owner(
             gateway,
@@ -118,24 +118,35 @@ def telegram_owner_commands_rule(
         )
         return {"action": "skip", "reason": "owner_telegram_command"}
 
-    # handover
+    # takeover — owner silences the bot for this chat
     ttl = cfg.timeout_minutes * 60 if cfg.timeout_minutes else None
+    enc = encode_chat_id(stored_chat_id)
     if active_row:
         if ttl:
-            state.handovers.touch(customer_platform, stored_chat_id, ttl)
+            state.takeovers.touch(customer_platform, stored_chat_id, ttl)
+        msg = f"✓ Takeover already active for {stored_chat_id}. TTL extended."
     else:
-        state.handovers.activate(
+        state.takeovers.activate(
             customer_platform,
             stored_chat_id,
-            reason="manual handover from Telegram",
+            reason="manual takeover from Telegram",
             activated_by="owner_telegram_command",
             ttl_seconds=ttl,
+        )
+        customer_phone, customer_link = format_chat_link(customer_platform, stored_chat_id)
+        label_name = _customer_display_label(customer_platform, stored_chat_id, user_name=None)
+        msg = format_notify_on_activate(
+            customer_name=label_name,
+            customer_phone=customer_phone or "",
+            customer_link=customer_link or "",
+            reason="manual takeover from Telegram",
+            chat_id_encoded=enc,
         )
 
     notify_owner(
         gateway,
         owner_platform=cfg.owner.platform,
         owner_chat_id=cfg.owner.chat_id,
-        message=f"✓ Handover active: {stored_chat_id}. Bot silenced.",
+        message=msg,
     )
     return {"action": "skip", "reason": "owner_telegram_command"}

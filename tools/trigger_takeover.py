@@ -1,14 +1,10 @@
-"""trigger_handover tool — agent-driven escalation to a human owner.
+"""trigger_takeover tool — agent-driven escalation so the owner handles the chat.
 
 The agent calls this tool when it determines the conversation needs a human
-(e.g., out-of-scope request, customer explicitly asked). Activates a
-handover row for the *current* chat (looked up via task_id == session_key)
-and notifies the owner via the existing gateway adapter.
+owner to take over (bot stops replying). Activates a takeover row for the
+*current* chat (looked up via task_id == session_key) and notifies the owner.
 
-The tool description is intentionally generic so the same plugin can be
-used across profiles. Profile-specific "what counts as out of scope" rules
-should live in the user's AGENTS.md / personality prompt — the tool
-description tells the LLM to consult those operating instructions.
+Profile-specific "what counts as out of scope" rules belong in AGENTS.md.
 """
 
 from __future__ import annotations
@@ -18,15 +14,15 @@ import logging
 import time
 from typing import Any, Callable, Dict, Optional, Tuple
 
-from ..notify import format_chat_link, notify_owner
+from ..notify import format_chat_link, format_notify_on_activate, notify_owner
 from ..state import alias_chat_ids
 from ..tg_commands import encode_chat_id
 
-logger = logging.getLogger("gateway-policy.tools.trigger_handover")
+logger = logging.getLogger("gateway-policy.tools.trigger_takeover")
 
 
 _TOOL_DESCRIPTION = (
-    "Hand the current conversation over to a human owner. The bot will stop "
+    "Signal that the owner should take over this chat. The bot will stop "
     "replying to this customer; their messages are still recorded so the "
     "owner can catch up and respond manually.\n\n"
     "Call this tool ONLY when:\n"
@@ -41,13 +37,13 @@ _TOOL_DESCRIPTION = (
     "human intervention is actually required.\n\n"
     "After calling this tool, send the customer a short natural reply "
     "acknowledging their request (e.g. that you will check and follow up "
-    "soon). Do not mention 'owner', 'handover', or automation — sound like "
-    "a normal human staff member, then end your turn."
+    "soon). Do not mention 'owner', 'takeover', 'handover', or automation — "
+    "sound like a normal human staff member, then end your turn."
 )
 
 
 _SCHEMA: Dict[str, Any] = {
-    "name": "trigger_handover",
+    "name": "trigger_takeover",
     "description": _TOOL_DESCRIPTION,
     "parameters": {
         "type": "object",
@@ -56,7 +52,7 @@ _SCHEMA: Dict[str, Any] = {
                 "type": "string",
                 "description": (
                     "One short sentence (<= 200 chars) explaining why "
-                    "handover is needed. Shown to the owner verbatim. "
+                    "the owner needs to step in. Shown to the owner verbatim. "
                     "Example: 'Customer asked for custom design '"
                     "'consultation, which is outside our self-serve flow.'"
                 ),
@@ -85,31 +81,23 @@ def _err(code: str, message: str) -> str:
 def _resolve_session_context(
     state: Any, task_id: Optional[str]
 ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[Any]]:
-    """Recover (platform, chat_id, user_name, gateway) for a tool call.
-
-    Tries the active_sessions stash first (set by the pre_gateway_dispatch
-    hook); falls back to parsing task_id (= session_key:
-    ``agent:main:<platform>:<chat_type>:<chat_id>[:<thread_id>]``).
-    """
     if not task_id:
         return None, None, None, None
 
     cached = state.active_sessions.get(task_id)
     if cached:
-        return cached  # (platform, chat_id, user_name, gateway)
+        return cached
 
-    # Fallback: parse session key.
     parts = task_id.split(":")
-    # ['agent', 'main', '<platform>', '<chat_type>', '<chat_id>', ...]
     if len(parts) >= 5 and parts[0] == "agent":
         return parts[2], parts[4], None, None
     return None, None, None, None
 
 
-def make_trigger_handover_tool(
+def make_trigger_takeover_tool(
     get_state: Callable[[], Any]
 ) -> Tuple[Dict[str, Any], Callable[..., str]]:
-    """Factory returning (schema, handler) for the trigger_handover tool."""
+    """Factory returning (schema, handler) for the trigger_takeover tool."""
 
     def handler(args: Dict[str, Any], **kwargs) -> str:
         reason = str(args.get("reason") or "").strip()
@@ -123,8 +111,8 @@ def make_trigger_handover_tool(
         cfg = state.config.handover
         if not cfg.enabled:
             return _err(
-                "handover_disabled",
-                "Handover is not enabled in the gateway-policy config.",
+                "takeover_disabled",
+                "Takeover is not enabled in the gateway-policy config.",
             )
 
         task_id = kwargs.get("task_id")
@@ -138,21 +126,19 @@ def make_trigger_handover_tool(
         if cfg.platforms and platform not in cfg.platforms:
             return _err(
                 "platform_not_configured",
-                f"Handover is not enabled for platform '{platform}'.",
+                f"Takeover is not enabled for platform '{platform}'.",
             )
 
         ttl = cfg.timeout_minutes * 60 if cfg.timeout_minutes else None
-        # If a row already exists under any alias form (phone-JID/LID),
-        # reuse its chat_id so we don't fragment state across variants.
-        existing = state.handovers.find_active(
+        existing = state.takeovers.find_active(
             platform, alias_chat_ids(platform, chat_id)
         )
         active_chat_id = existing.chat_id if existing else chat_id
-        state.handovers.activate(
+        state.takeovers.activate(
             platform,
             active_chat_id,
             reason=f"agent_tool:{reason}",
-            activated_by="trigger_handover_tool",
+            activated_by="trigger_takeover_tool",
             ttl_seconds=ttl,
         )
 
@@ -160,19 +146,14 @@ def make_trigger_handover_tool(
         if gateway and cfg.owner.platform and cfg.owner.chat_id:
             customer_name = user_name or "customer"
             customer_phone, customer_link = format_chat_link(platform, active_chat_id)
-            fmt_kwargs = {
-                "customer_name": customer_name,
-                "chat_id": active_chat_id,
-                "platform": platform,
-                "reason": reason,
-                "activated_by": "agent",
-                "customer_phone": customer_phone,
-                "customer_link": customer_link,
-            }
-            tpl = cfg.notify_on_activate
-            if "{chat_id_encoded}" in tpl:
-                fmt_kwargs["chat_id_encoded"] = encode_chat_id(active_chat_id)
-            message = tpl.format(**fmt_kwargs)
+            enc = encode_chat_id(active_chat_id)
+            message = format_notify_on_activate(
+                customer_name=customer_name,
+                customer_phone=customer_phone or "",
+                customer_link=customer_link or "",
+                reason=reason,
+                chat_id_encoded=enc,
+            )
             if summary:
                 message = f"{message}\n\nAgent summary: {summary}"
             notified = notify_owner(
@@ -182,10 +163,10 @@ def make_trigger_handover_tool(
                 message=message,
             )
             if notified:
-                state.handovers.mark_notified(platform, active_chat_id)
+                state.takeovers.mark_notified(platform, active_chat_id)
 
         logger.info(
-            "trigger_handover activated by agent: platform=%s chat=%s reason=%s notified=%s",
+            "trigger_takeover activated by agent: platform=%s chat=%s reason=%s notified=%s",
             platform, active_chat_id, reason, notified,
         )
 

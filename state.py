@@ -1,7 +1,7 @@
-"""Runtime state for gateway-policy: SQLite-backed handover state + in-memory
+"""Runtime state for gateway-policy: SQLite-backed takeover state + in-memory
 buffers and listen-only windows.
 
-Handover rows must survive gateway restarts (handovers can be long-lived);
+Takeover rows must survive gateway restarts (sessions can be long-lived);
 listen-only buffers/windows are ephemeral (2-minute windows, acceptable
 to lose on restart).
 """
@@ -32,7 +32,7 @@ def whatsapp_alias_chat_ids(chat_id: str) -> List[str]:
     depending on protocol version, contact-card state, and whatever
     Baileys learned in the current session. State keyed by one form
     silently misses lookups using the other, which is exactly the bug
-    that allowed the bot to keep replying after a handover was active.
+    that allowed the bot to keep replying after a takeover was active.
 
     We resolve the alias set via
     :func:`gateway.whatsapp_identity.expand_whatsapp_aliases` (the same
@@ -74,7 +74,7 @@ def whatsapp_alias_chat_ids(chat_id: str) -> List[str]:
 
 
 def alias_chat_ids(platform: str, chat_id: str) -> List[str]:
-    """Platform-aware alias expansion for handover lookups.
+    """Platform-aware alias expansion for takeover lookups.
 
     WhatsApp chats can flip between phone-JID and LID forms; other
     platforms have stable chat ids and pass through unchanged.
@@ -85,7 +85,7 @@ def alias_chat_ids(platform: str, chat_id: str) -> List[str]:
 
 
 @dataclass
-class HandoverRow:
+class TakeoverRow:
     platform: str
     chat_id: str
     reason: str
@@ -106,9 +106,10 @@ def _state_dir() -> Path:
     return path
 
 
-class HandoverStore:
-    """Thin SQLite wrapper for the handovers table."""
+class TakeoverStore:
+    """Thin SQLite wrapper — table name is ``handovers`` (historical; see below)."""
 
+    # Historical name: kept as `handovers` to avoid migration; conceptually stores takeovers.
     _SCHEMA = """
     CREATE TABLE IF NOT EXISTS handovers (
         platform      TEXT NOT NULL,
@@ -137,7 +138,7 @@ class HandoverStore:
             )
             self._conn.execute("PRAGMA journal_mode=WAL")
             # Wait on transient SQLite locks rather than failing fast — avoids
-            # OperationalError contention between gateway and agent on handover_rule.
+            # OperationalError contention between gateway and agent on takeover_rule.
             self._conn.execute("PRAGMA busy_timeout=5000")
         return self._conn
 
@@ -154,7 +155,7 @@ class HandoverStore:
         reason: str,
         activated_by: str = "",
         ttl_seconds: Optional[float] = None,
-    ) -> HandoverRow:
+    ) -> TakeoverRow:
         now = time.time()
         expires_at = (now + ttl_seconds) if ttl_seconds and ttl_seconds > 0 else None
         with self._lock:
@@ -173,7 +174,7 @@ class HandoverStore:
                 """,
                 (platform, chat_id, reason, now, activated_by, expires_at),
             )
-        return HandoverRow(
+        return TakeoverRow(
             platform=platform,
             chat_id=chat_id,
             reason=reason,
@@ -183,7 +184,7 @@ class HandoverStore:
             notified=False,
         )
 
-    def get(self, platform: str, chat_id: str) -> Optional[HandoverRow]:
+    def get(self, platform: str, chat_id: str) -> Optional[TakeoverRow]:
         with self._lock:
             conn = self._connect()
             cur = conn.execute(
@@ -195,7 +196,7 @@ class HandoverStore:
             row = cur.fetchone()
         if not row:
             return None
-        return HandoverRow(
+        return TakeoverRow(
             platform=row[0],
             chat_id=row[1],
             reason=row[2] or "",
@@ -217,7 +218,7 @@ class HandoverStore:
 
     def find_active(
         self, platform: str, candidates: Iterable[str]
-    ) -> Optional[HandoverRow]:
+    ) -> Optional[TakeoverRow]:
         """Return the first non-expired row for any of ``candidates``.
 
         Used by callers that know multiple chat_id forms can alias to the
@@ -242,7 +243,7 @@ class HandoverStore:
 
     def expire_stale(
         self, platform: str, candidates: Iterable[str]
-    ) -> List[HandoverRow]:
+    ) -> List[TakeoverRow]:
         """Delete any rows in ``candidates`` whose ``expires_at`` is past.
 
         Returns the rows that were just deleted so the caller can react to
@@ -257,7 +258,7 @@ class HandoverStore:
         """
         seen: set = set()
         now = time.time()
-        expired: List[HandoverRow] = []
+        expired: List[TakeoverRow] = []
         for cid in candidates:
             if not cid or cid in seen:
                 continue
@@ -278,7 +279,7 @@ class HandoverStore:
         chat_id: str,
         ttl_seconds: float,
     ) -> bool:
-        """Slide the expiry on an existing handover.
+        """Slide the expiry on an existing takeover row.
 
         Updates ``expires_at = now + ttl_seconds`` only if a row already
         exists *and* it has a TTL set (a row with ``expires_at IS NULL``
@@ -314,7 +315,7 @@ class HandoverStore:
                 (platform, chat_id),
             )
 
-    def deactivate(self, platform: str, chat_id: str) -> Optional[HandoverRow]:
+    def deactivate(self, platform: str, chat_id: str) -> Optional[TakeoverRow]:
         row = self.get(platform, chat_id)
         if not row:
             return None
@@ -326,7 +327,7 @@ class HandoverStore:
             )
         return row
 
-    def list_active(self) -> List[HandoverRow]:
+    def list_active(self) -> List[TakeoverRow]:
         with self._lock:
             conn = self._connect()
             cur = conn.execute(
@@ -334,7 +335,7 @@ class HandoverStore:
                           expires_at, notified FROM handovers"""
             )
             rows = cur.fetchall()
-        out: List[HandoverRow] = []
+        out: List[TakeoverRow] = []
         now = time.time()
         for r in rows:
             expires_at = r[5]
@@ -342,7 +343,7 @@ class HandoverStore:
                 self.deactivate(r[0], r[1])
                 continue
             out.append(
-                HandoverRow(
+                TakeoverRow(
                     platform=r[0],
                     chat_id=r[1],
                     reason=r[2] or "",
@@ -357,24 +358,24 @@ class HandoverStore:
 
 @dataclass
 class PolicyState:
-    """Container for config + handover store + ephemeral in-memory state."""
+    """Container for config + takeover store + ephemeral in-memory state."""
 
     config: PolicyConfig
-    _store: Optional[HandoverStore] = None
+    _store: Optional[TakeoverStore] = None
     # (platform, chat_id) -> deque of (user_name, text, timestamp)
     buffers: Dict[Tuple[str, str], Deque[Tuple[str, str, float]]] = field(default_factory=dict)
     # (platform, chat_id) -> window expiry epoch
     listen_windows: Dict[Tuple[str, str], float] = field(default_factory=dict)
     # session_key -> most-recent (platform, chat_id, user_name, gateway_ref).
-    # Populated by the pre_gateway_dispatch hook so the trigger_handover
+    # Populated by the pre_gateway_dispatch hook so the trigger_takeover
     # tool (which only receives task_id == session_key) can recover its
     # acting context.
     active_sessions: Dict[str, Tuple[str, str, str, Any]] = field(default_factory=dict)
 
     @property
-    def handovers(self) -> HandoverStore:
+    def takeovers(self) -> TakeoverStore:
         if self._store is None:
-            self._store = HandoverStore(_state_dir() / "state.db")
+            self._store = TakeoverStore(_state_dir() / "state.db")
         return self._store
 
     def buffer_for(self, key: Tuple[str, str]) -> Deque[Tuple[str, str, float]]:

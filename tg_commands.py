@@ -1,4 +1,4 @@
-"""Telegram slash-command helpers for owner-side handover control.
+"""Telegram slash-command helpers for owner-side takeover / handover control.
 
 Telegram only linkifies ``/commands`` when the command body matches
 ``[A-Za-z0-9_]`` (after the leading ``/``). WhatsApp JIDs contain ``@`` and
@@ -17,7 +17,7 @@ _SUB_DOT = "_DOT_"
 # then ``_``, then the encoded chat id.  Lazy quantifier so ``_AT_`` inside
 # the token is not folded into the bot name.
 _INLINE_BOT_RE = re.compile(
-    r"^/(?P<verb>handover|takeback)@"
+    r"^/(?P<verb>takeover|handover)@"
     r"(?P<bot>[A-Za-z][A-Za-z0-9_]{3,30}?)"
     r"_(?P<rest>\S+)$",
     re.IGNORECASE,
@@ -26,7 +26,7 @@ _INLINE_BOT_RE = re.compile(
 _TRAILING_BOT_RE = re.compile(r"@[A-Za-z][A-Za-z0-9_]{3,30}\s*$")
 
 _CMD_RE = re.compile(
-    r"^/(?P<verb>handover|takeback)_(?P<tok>\S+)$",
+    r"^/(?P<verb>takeover|handover)_(?P<tok>\S+)$",
     re.IGNORECASE,
 )
 
@@ -56,10 +56,11 @@ def decode_chat_id(token: str) -> str:
 
 
 def parse_owner_command(text: str) -> Optional[Tuple[str, str]]:
-    """Parse owner ``/handover_<token>`` or ``/takeback_<token>`` messages.
+    """Parse owner ``/takeover_<token>`` or ``/handover_<token>`` messages.
 
-    Returns ``("handover", chat_id)`` or ``("takeback", chat_id)`` with
-    *chat_id* decoded, or ``None`` if *text* is not a lone owner command.
+    Returns ``("takeover", chat_id)`` — owner silences the bot — or
+    ``("handover", chat_id)`` — owner resumes the bot — with *chat_id*
+    decoded, or ``None`` if *text* is not a lone owner command.
 
     Strips a trailing ``@BotName`` suffix and normalizes
     ``/verb@BotName_token`` → ``/verb_token`` (Telegram group mention forms).

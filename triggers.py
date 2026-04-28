@@ -2,7 +2,7 @@
 
 Currently only bot-mention detection (used by ``rules/listen_only.py``).
 Phrase-matching and the optional LLM classifier paths were removed when
-handover activation was consolidated to the ``trigger_handover`` tool —
+takeover activation was consolidated to the ``trigger_takeover`` tool —
 they were unreliable across mixed-language deployments and redundant
 with the main agent's own classification pass.
 """

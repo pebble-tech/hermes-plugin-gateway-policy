@@ -3,10 +3,10 @@
 Patterns supported out of the box:
 - listen_only: buffer ambient group messages, collapse into the next tagged
   turn, open a follow-up window so contiguous replies don't require re-tagging.
-- handover: silent-ingest customer messages while the owner handles them
-  manually. Activation is agent-driven via the ``trigger_handover`` tool;
-  the gateway-side rule only enforces an already-active handover (silent
-  ingest + owner ``/takeback``).
+- takeover: silent-ingest customer messages while the owner handles them
+  manually. Activation is agent-driven via the ``trigger_takeover`` tool;
+  the gateway-side rule only enforces an active takeover (silent ingest +
+  owner ``/handover`` in the customer chat to resume the bot).
 
 Extension API: external plugins may call `register_rule(fn, priority=50)`
 to add their own pre-dispatch rules without modifying this plugin.
@@ -33,11 +33,11 @@ if __package__ in (None, ""):
 else:
     from .config import load_policy_config
     from .rules.base import clear_rules, list_rules, register_rule, run_pipeline
-    from .rules.handover import handover_rule
+    from .rules.takeover import takeover_rule
     from .rules.listen_only import listen_only_rule
     from .rules.telegram_owner_commands import telegram_owner_commands_rule
     from .state import PolicyState
-    from .tools.trigger_handover import make_trigger_handover_tool
+    from .tools.trigger_takeover import make_trigger_takeover_tool
 
     __all__ = ["register_rule", "run_pipeline", "list_rules"]
 
@@ -58,7 +58,7 @@ else:
         if not state.config.enabled:
             return None
 
-        # Stash source-by-(session_key, session_id) so trigger_handover can
+        # Stash source-by-(session_key, session_id) so trigger_takeover can
         # recover the platform/chat_id/user_name from whichever id the agent
         # forwards as ``task_id``.  The gateway's main message dispatch path
         # passes ``task_id=session_id`` (the per-session file id, e.g.
@@ -112,22 +112,25 @@ else:
             priority=55,
             name="telegram_owner_commands",
         )
-        register_rule(handover_rule, priority=60, name="handover")
+        register_rule(takeover_rule, priority=60, name="takeover")
 
         ctx.register_hook("pre_gateway_dispatch", _pre_gateway_dispatch)
 
         if state.config.handover.enabled and state.config.handover.tool.enabled:
-            schema, handler = make_trigger_handover_tool(get_state)
+            schema, handler = make_trigger_takeover_tool(get_state)
             ctx.register_tool(
-                name="trigger_handover",
+                name="trigger_takeover",
                 toolset="gateway_policy",
                 schema=schema,
                 handler=handler,
-                description="Hand the current conversation over to a human owner.",
+                description=(
+                    "Signal that the owner should take over this chat; the bot stops "
+                    "replying until the owner hands control back."
+                ),
             )
 
         logger.info(
-            "gateway-policy loaded: listen_only=%d chat(s), handover=%s, tool=%s",
+            "gateway-policy loaded: listen_only=%d chat(s), takeover=%s, tool=%s",
             len(state.config.listen_only.chats),
             state.config.handover.enabled,
             state.config.handover.tool.enabled,

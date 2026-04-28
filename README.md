@@ -9,11 +9,11 @@ touching any business-logic plugin:
    so contiguous replies don't require re-tagging. Built for
    customer-service group chats where the bot shouldn't react to
    every message but needs the preceding context when it does.
-2. **handover** — silent-ingest customer messages while the owner
-   handles the chat manually. Activation is agent-driven via the
-   `trigger_handover` tool (or owner-implicit WhatsApp / owner Telegram
-   slash-commands); the gateway-side rules enforce an active handover
-   (silent ingest + owner `/takeback` or Telegram `/takeback_<id>`).
+2. **takeover** (YAML key remains `plugins.gateway-policy.handover`) —
+   silent-ingest customer messages while the **owner has taken over** the chat.
+   Activation is agent-driven via `trigger_takeover`, owner-implicit WhatsApp,
+   or owner Telegram slash-commands (`/takeover_<id>`). The bot **resumes** when the
+   owner sends `/handover` in the customer chat or `/handover_<id>` from Telegram.
 
 Both patterns are profile-agnostic — install once, configure per
 profile via `config.yaml`. Works across every gateway platform
@@ -111,7 +111,7 @@ whatsapp:
     - "120363xxxxxxxxxxxx@g.us"
 ```
 
-**Handover on customer DMs:**
+**Takeover on customer DMs:**
 
 ```yaml
 plugins:
@@ -123,14 +123,15 @@ plugins:
       owner:
         platform: whatsapp
         chat_id: "60123456789@s.whatsapp.net"
-      exit_command: "/takeback"
+      exit_command: "/handover"
       tool:
         enabled: true
 ```
 
-Handover only activates when the agent calls `trigger_handover`. There
-is no gateway-side phrase or LLM-classifier trigger — tell the agent
-*when* to escalate via your `AGENTS.md` (see the next section).
+Takeover activates when the agent calls `trigger_takeover`. Owner
+notifications are **hardcoded** in `notify.py` (edit there if you need
+different wording). There is no gateway-side phrase trigger — tell the
+agent *when* to escalate via `AGENTS.md` (see the next section).
 
 Profile isolation is automatic — Hermes resolves
 `get_hermes_home()` to the active profile, so each profile gets its
@@ -140,7 +141,7 @@ See `config.example.yaml` for the full option reference.
 
 ---
 
-## Agent guidance for `trigger_handover`
+## Agent guidance for `trigger_takeover`
 
 The tool description tells the LLM **when** to escalate (explicit
 ask for a human, or out-of-scope per operating instructions).
@@ -148,7 +149,7 @@ Profile-specific scope rules belong in your `AGENTS.md` /
 personality prompt, e.g.:
 
 ```markdown
-## Out of scope (use trigger_handover)
+## Out of scope (use trigger_takeover)
 
 - Custom design consultations (sketches, color matching, edge cases)
 - Refund disputes
@@ -193,7 +194,7 @@ Priority conventions:
 |-------|-----|
 | 0-29  | High-priority overrides (VIP, global allowlists) |
 | 30-49 | Profile-specific pre-rules |
-| 50-79 | Built-in (`listen_only=50`, `telegram_owner_commands=55`, `handover=60`) |
+| 50-79 | Built-in (`listen_only=50`, `telegram_owner_commands=55`, `takeover=60`) |
 | 80+   | Observers / logging only |
 
 The first rule returning a non-None action dict wins; remaining
@@ -231,7 +232,7 @@ sqlite3 ~/.hermes/profiles/<name>/workspace/state/gateway-policy/state.db \
   "SELECT * FROM handovers"
 ```
 
-Force-clear an active handover:
+Force-clear an active takeover row:
 
 ```bash
 sqlite3 ~/.hermes/profiles/<name>/workspace/state/gateway-policy/state.db \
@@ -267,18 +268,18 @@ hermes-plugin-gateway-policy/
 ├── config.example.yaml      # full config reference (paste into profile)
 ├── __init__.py              # plugin entry: register() + register_rule()
 ├── config.py                # dataclass config loader
-├── state.py                 # PolicyState + SQLite HandoverStore
+├── state.py                 # PolicyState + SQLite TakeoverStore (`handovers` table name)
 ├── triggers.py              # bot-mention helpers (used by listen_only)
-├── notify.py                # owner notification helpers
-├── tg_commands.py           # Telegram /handover_ /takeback_ encoding + parse
-├── transcript_utils.py      # silent-ingest helpers
+├── notify.py                # owner notifications (fixed templates — edit here to customize)
+├── tg_commands.py           # Telegram /takeover_ /handover_ encoding + parse
+├── transcript_utils.py      # silent-ingest helpers + boundary-note text
 ├── rules/
 │   ├── base.py              # rule registry + pipeline runner
 │   ├── listen_only.py
 │   ├── telegram_owner_commands.py
-│   └── handover.py
+│   └── takeover.py
 ├── tools/
-│   └── trigger_handover.py  # tool schema + handler
+│   └── trigger_takeover.py # tool schema + handler
 ├── tests/                   # pytest suite
 ├── pyproject.toml           # dev-tool config (pytest, ruff)
 ├── LICENSE
@@ -298,8 +299,8 @@ expects (it clones and `mv`'s the whole tree into
   filters `fromMe` messages, so an owner replying through the bot's
   WhatsApp does *not* appear in the customer's transcript. The
   customer sees the reply, but the bot has no record of it. If the
-  owner later `/takeback`s, the bot's view of "what happened during
-  handover" is one-sided.
+  owner later `/handover`s to resume the bot, the bot's view of what
+  happened during the owner's takeover window can remain one-sided.
 - **Listen-only requires platform-side passthrough**: the plugin
   can't make an adapter forward filtered messages on its own — you
   must list the chat under `<platform>.free_response_chats`.
