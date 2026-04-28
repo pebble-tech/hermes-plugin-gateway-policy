@@ -237,6 +237,38 @@ class HandoverStore:
             return row
         return None
 
+    def expire_stale(
+        self, platform: str, candidates: Iterable[str]
+    ) -> List[HandoverRow]:
+        """Delete any rows in ``candidates`` whose ``expires_at`` is past.
+
+        Returns the rows that were just deleted so the caller can react to
+        the transition (e.g. write a boundary marker into the transcript).
+        Rows with ``expires_at IS NULL`` (permanent handovers) are left
+        alone. Safe to call before :meth:`find_active`; the latter still
+        lazy-expires as a safety net but in practice the row is already
+        gone by then.
+
+        Scoped to ``candidates`` rather than the whole table so we never
+        report another chat's expiry to a customer's session.
+        """
+        seen: set = set()
+        now = time.time()
+        expired: List[HandoverRow] = []
+        for cid in candidates:
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            row = self.get(platform, cid)
+            if not row:
+                continue
+            if row.expires_at is None or row.expires_at >= now:
+                continue
+            removed = self.deactivate(platform, cid)
+            if removed:
+                expired.append(removed)
+        return expired
+
     def touch(
         self,
         platform: str,

@@ -766,6 +766,72 @@ class TestOwnerImplicit:
         assert result is None
         assert fresh_state.handovers.get("whatsapp", src_dm.chat_id) is None
 
+    def test_owner_inbound_silent_ingest_uses_owner_reply_prefix(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Regression: silent-ingested owner messages must be tagged with
+        a `[owner reply]` prefix.  Without it, the customer's transcript
+        stores them as bare ``role: "user"`` entries indistinguishable
+        from customer turns, and the agent's next reply mis-attributes
+        the owner's words/images to the customer.  Live failure looked
+        like: "Thanks <customer>! I see you sent some images" when the
+        owner — not the customer — sent them."""
+        from gateway_policy.rules.handover import handover_rule
+
+        # Cold-chat activation: owner sends "[image received]" placeholder
+        # in a chat with no prior handover → activate + silent-ingest.
+        event = self._owner_event(src_dm, "[image received]")
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_owner_activate"}
+        assert len(session_store.appended) == 1
+        _sid, msg = session_store.appended[-1]
+        assert msg["role"] == "user"
+        assert msg["content"] == "[owner reply] [image received]", msg["content"]
+
+    def test_owner_inbound_silent_ingest_prefix_on_active_chat(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Same prefix on the TTL-slide branch (handover already active)."""
+        from gateway_policy.rules.handover import handover_rule
+
+        fresh_state.handovers.activate(
+            "whatsapp",
+            src_dm.chat_id,
+            reason="agent_tool:scope mismatch",
+            activated_by="trigger_handover_tool",
+            ttl_seconds=600,
+        )
+
+        event = self._owner_event(src_dm, "ok handling it")
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_owner_extend"}
+        _sid, msg = session_store.appended[-1]
+        assert msg["content"] == "[owner reply] ok handling it"
+
+    def test_customer_silent_ingest_unprefixed(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Negative complement: customer messages during active handover
+        must NOT pick up the owner prefix — the metadata flag is the
+        sole signal."""
+        from gateway_policy.rules.handover import handover_rule
+
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id, reason="manual", activated_by="test"
+        )
+
+        event = FakeEvent(text="any update?", source=src_dm, metadata={})
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_active"}
+        _sid, msg = session_store.appended[-1]
+        assert msg["content"] == "any update?"
+
 
 # ---------------------------------------------------------------------------
 # trigger_handover tool
@@ -1070,6 +1136,204 @@ class TestNotifyTokens:
         assert adapter.sent
         _, message = adapter.sent[-1]
         assert message == f"Handover: Kong ({src_dm.chat_id}). Reason: x"
+
+
+# ---------------------------------------------------------------------------
+# boundary notes on handover deactivation
+# ---------------------------------------------------------------------------
+
+class TestHandoverBoundaryNote:
+    """Confirm a `[handover-ended]` marker is appended to the transcript on
+    every handover-deactivation path so the agent's next reply doesn't echo
+    stale "owner has been notified" turns. See AGENTS.md handover policy."""
+
+    @staticmethod
+    def _last_appended_role_user(session_store):
+        return [
+            (sid, msg)
+            for sid, msg in session_store.appended
+            if msg.get("role") == "user"
+        ]
+
+    @staticmethod
+    def _has_boundary_note(session_store):
+        return any(
+            isinstance(msg.get("content"), str)
+            and msg["content"].startswith("[handover-ended]")
+            for _sid, msg in session_store.appended
+        )
+
+    def test_takeback_writes_boundary_note(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        from gateway_policy.rules.handover import handover_rule
+
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id, reason="manual", activated_by="test"
+        )
+        owner_src = FakeSource(
+            platform_str="whatsapp",
+            chat_type="dm",
+            chat_id=src_dm.chat_id,
+            user_id=fresh_state.config.handover.owner.chat_id,
+            user_name="Owner",
+        )
+        event = FakeEvent(text="/takeback", source=owner_src)
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_exit"}
+        assert self._has_boundary_note(session_store), session_store.appended
+
+    def test_lazy_expiry_writes_boundary_note_on_next_inbound(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Customer message arriving after the row's TTL has elapsed must
+        clear the row AND drop a boundary marker into the transcript so
+        the next agent reply isn't biased by prior handover-era turns."""
+        from gateway_policy.rules.handover import handover_rule
+
+        # Activate with a short TTL, then force-expire by rewinding expires_at.
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id,
+            reason="manual", activated_by="test",
+            ttl_seconds=600,
+        )
+        # Rewind to the past — simulates the operator's "set expires_at to
+        # activation time" trick AND the natural TTL-elapsed case.
+        with fresh_state.handovers._lock:
+            fresh_state.handovers._connect().execute(
+                "UPDATE handovers SET expires_at = activated_at "
+                "WHERE platform=? AND chat_id=?",
+                ("whatsapp", src_dm.chat_id),
+            )
+
+        event = FakeEvent(text="hi", source=src_dm)
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        # Row should be gone and the rule should pass through (None) so
+        # the agent dispatches normally.
+        assert result is None
+        assert not fresh_state.handovers.is_active("whatsapp", src_dm.chat_id)
+        assert self._has_boundary_note(session_store), session_store.appended
+
+    def test_no_active_row_writes_no_boundary_note(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Plain customer message into a chat that never had a handover
+        must not produce a boundary marker — the marker is only meaningful
+        at a real ON→OFF transition."""
+        from gateway_policy.rules.handover import handover_rule
+
+        event = FakeEvent(text="hi", source=src_dm)
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result is None
+        assert not self._has_boundary_note(session_store)
+
+    def test_active_handover_silent_ingest_writes_no_boundary_note(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """During an ACTIVE handover, customer messages are silent-ingested
+        but the boundary marker (which signals end-of-handover) must NOT
+        fire — otherwise the agent would think handover ended every turn."""
+        from gateway_policy.rules.handover import handover_rule
+
+        fresh_state.handovers.activate(
+            "whatsapp", src_dm.chat_id,
+            reason="manual", activated_by="test",
+            ttl_seconds=600,
+        )
+
+        event = FakeEvent(text="any update?", source=src_dm)
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_active"}
+        assert not self._has_boundary_note(session_store)
+
+    def test_dual_alias_rows_one_expired_one_active_writes_no_boundary_note(
+        self, fresh_state, src_dm, session_store, gateway, monkeypatch
+    ):
+        """Edge case: a chat keyed under TWO alias forms (phone-JID and
+        LID), one row expired, the other still active.  expire_stale
+        deletes the expired one but the bot must remain silent — and we
+        must NOT drop a `[handover-ended]` marker, otherwise the agent
+        would be told handover ended while it is still on under the
+        other alias."""
+        import sys
+        import types
+        from gateway_policy.rules.handover import handover_rule
+
+        # Stub gateway.whatsapp_identity so both forms alias the same human.
+        fake = types.ModuleType("gateway.whatsapp_identity")
+        aliases = {
+            "60173380115@s.whatsapp.net": {"60173380115", "122299244130458"},
+            "122299244130458@lid": {"60173380115", "122299244130458"},
+        }
+        fake.expand_whatsapp_aliases = lambda v: set(aliases.get(str(v), [str(v)]))
+        sys.modules.setdefault("gateway", types.ModuleType("gateway"))
+        monkeypatch.setitem(sys.modules, "gateway.whatsapp_identity", fake)
+
+        # Row A: under phone-JID, force-expired.
+        fresh_state.handovers.activate(
+            "whatsapp", "60173380115@s.whatsapp.net",
+            reason="r", activated_by="t", ttl_seconds=600,
+        )
+        with fresh_state.handovers._lock:
+            fresh_state.handovers._connect().execute(
+                "UPDATE handovers SET expires_at = activated_at "
+                "WHERE chat_id='60173380115@s.whatsapp.net'"
+            )
+        # Row B: under LID, still active.
+        fresh_state.handovers.activate(
+            "whatsapp", "122299244130458@lid",
+            reason="r", activated_by="t", ttl_seconds=600,
+        )
+
+        kong = FakeSource(
+            platform_str="whatsapp",
+            chat_type="dm",
+            chat_id="122299244130458@lid",
+            user_id="122299244130458@lid",
+            user_name="Kong",
+        )
+        event = FakeEvent(text="hi", source=kong)
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+
+        # Bot must stay silent — handover still active under the LID row.
+        assert result == {"action": "skip", "reason": "handover_active"}
+        # And NO boundary marker was written.
+        assert not self._has_boundary_note(session_store), session_store.appended
+
+    def test_expire_stale_returns_deleted_rows_and_no_others(
+        self, fresh_state, src_dm
+    ):
+        """HandoverStore.expire_stale only touches rows in `candidates` and
+        returns the actually-deleted rows so the caller can react to the
+        transition."""
+        store = fresh_state.handovers
+        # Two rows: one expired, one fresh.  Different chats.
+        store.activate("whatsapp", "expired@lid",
+                       reason="r", activated_by="t", ttl_seconds=600)
+        store.activate("whatsapp", "fresh@lid",
+                       reason="r", activated_by="t", ttl_seconds=600)
+        with store._lock:
+            store._connect().execute(
+                "UPDATE handovers SET expires_at = activated_at "
+                "WHERE chat_id='expired@lid'"
+            )
+
+        # Scoped expire — must only touch candidates we asked about.
+        deleted = store.expire_stale("whatsapp", ["expired@lid"])
+        assert [r.chat_id for r in deleted] == ["expired@lid"]
+        assert store.get("whatsapp", "fresh@lid") is not None
+        # Idempotent: second call returns nothing new.
+        assert store.expire_stale("whatsapp", ["expired@lid"]) == []
 
 
 # ---------------------------------------------------------------------------

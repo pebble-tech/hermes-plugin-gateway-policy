@@ -35,7 +35,11 @@ from typing import Any, Dict, Optional
 
 from ..notify import format_chat_link, notify_owner
 from ..state import alias_chat_ids
-from ..transcript_utils import silent_ingest
+from ..transcript_utils import (
+    HANDOVER_ENDED_NOTE,
+    append_boundary_note,
+    silent_ingest,
+)
 
 logger = logging.getLogger("gateway-policy.rules.handover")
 
@@ -71,11 +75,19 @@ def _is_owner_message(event: Any, owner_platform: Optional[str], owner_chat_id: 
     return str(sender) == owner_chat_id
 
 
-def _deactivate(state, gateway, *, platform: str, chat_id: str, source) -> None:
+def _deactivate(state, gateway, session_store, *, platform: str, chat_id: str, source) -> None:
     cfg = state.config.handover
     row = state.handovers.deactivate(platform, chat_id)
     if not row:
         return
+    # Boundary marker so the agent's next reply doesn't parrot stale
+    # "owner has been notified" turns from earlier in this session.
+    append_boundary_note(
+        session_store,
+        source,
+        text=HANDOVER_ENDED_NOTE,
+        kind="handover_ended",
+    )
     if cfg.owner.platform and cfg.owner.chat_id:
         customer_name = (
             getattr(source, "user_name", None)
@@ -126,9 +138,25 @@ def handover_rule(*, event, gateway, session_store, state, **_kwargs) -> Optiona
     # writes to the *stored* chat_id so we don't fragment the row across
     # variants.
     candidates = alias_chat_ids(platform, chat_id)
+    # Drop expired rows for this chat first so the boundary-note path
+    # below can detect a "just expired" transition without racing
+    # find_active's own lazy delete.
+    expired_rows = state.handovers.expire_stale(platform, candidates)
     active_row = state.handovers.find_active(platform, candidates)
     is_active = active_row is not None
     stored_chat_id = active_row.chat_id if active_row else chat_id
+
+    # Boundary marker only on a genuine ON->OFF transition.  A WhatsApp
+    # chat can carry two alias-keyed rows (phone-JID vs LID); if one
+    # expires while the other is still active the bot must stay silent
+    # AND we must not hint to the agent that handover ended.
+    if expired_rows and not is_active:
+        append_boundary_note(
+            session_store,
+            source,
+            text=HANDOVER_ENDED_NOTE,
+            kind="handover_expired",
+        )
 
     # 1) /takeback first — must beat the owner-implicit branch so an owner
     # sending the exit command ends the handover even though the same
@@ -139,7 +167,14 @@ def handover_rule(*, event, gateway, session_store, state, **_kwargs) -> Optiona
         and text.lower() == cfg.exit_command.lower()
         and _is_owner_message(event, cfg.owner.platform, cfg.owner.chat_id)
     ):
-        _deactivate(state, gateway, platform=platform, chat_id=stored_chat_id, source=source)
+        _deactivate(
+            state,
+            gateway,
+            session_store,
+            platform=platform,
+            chat_id=stored_chat_id,
+            source=source,
+        )
         return {"action": "skip", "reason": "handover_exit"}
 
     # 2) Owner-implicit activation / TTL slide.  Driven entirely by adapter
