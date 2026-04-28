@@ -14,6 +14,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger("gateway-policy.transcript")
 
+_OWNER_REPLY_PREFIX = "[owner reply] "
 
 # Boundary-note text used when a handover ends.  Lives here so the rule
 # layer and tests share one source of truth.  The bracketed prefix is
@@ -33,9 +34,11 @@ def silent_ingest(session_store: Any, event: Any, *, reason: str) -> None:
       is known (matching core's convention so replies can attribute
       messages to the right speaker).
     - Owner-typed inbounds (carrying ``metadata['whatsapp_from_owner']``)
-      get an explicit ``[owner reply]`` prefix.  Without it, the
-      transcript stores both customer and owner-typed messages as plain
-      ``role: "user"`` entries — so the agent's next reply naturally
+      get an explicit ``[owner reply]`` prefix when not already present on
+      ``event.text`` (Hermes core may prefix at ``MessageEvent``
+      construction; this path stays idempotent).  Without any prefix,
+      the transcript stores both customer and owner-typed messages as
+      plain ``role: "user"`` entries — so the agent's next reply naturally
       attributes everything to the customer (e.g. "Thanks Kong, I see
       your images" when Kong never sent any).  The bracketed prefix is
       what AGENTS.md teaches the agent to recognise as the owner
@@ -55,8 +58,10 @@ def silent_ingest(session_store: Any, event: Any, *, reason: str) -> None:
         message_text = f"[{source.user_name}] {message_text}"
 
     metadata = getattr(event, "metadata", None) or {}
-    if metadata.get("whatsapp_from_owner"):
-        message_text = f"[owner reply] {message_text}"
+    if metadata.get("whatsapp_from_owner") and not message_text.startswith(
+        _OWNER_REPLY_PREFIX
+    ):
+        message_text = f"{_OWNER_REPLY_PREFIX}{message_text}"
 
     try:
         session_entry = session_store.get_or_create_session(source)

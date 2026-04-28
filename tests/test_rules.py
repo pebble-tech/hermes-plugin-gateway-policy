@@ -812,6 +812,22 @@ class TestOwnerImplicit:
         _sid, msg = session_store.appended[-1]
         assert msg["content"] == "[owner reply] ok handling it"
 
+    def test_owner_inbound_silent_ingest_no_double_prefix_when_core_prefixed(
+        self, fresh_state, src_dm, session_store, gateway
+    ):
+        """Hermes may set ``[owner reply] `` on ``event.text`` at source;
+        silent_ingest must not prepend a second copy."""
+        from gateway_policy.rules.handover import handover_rule
+
+        event = self._owner_event(src_dm, "[owner reply] [image received]")
+        result = handover_rule(
+            event=event, gateway=gateway, session_store=session_store, state=fresh_state
+        )
+        assert result == {"action": "skip", "reason": "handover_owner_activate"}
+        assert len(session_store.appended) == 1
+        _sid, msg = session_store.appended[-1]
+        assert msg["content"] == "[owner reply] [image received]", msg["content"]
+
     def test_customer_silent_ingest_unprefixed(
         self, fresh_state, src_dm, session_store, gateway
     ):
